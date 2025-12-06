@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Debug script for file decryption - save as: debug_decrypt.py
+Debug script for file decryption
 """
 
 import sys

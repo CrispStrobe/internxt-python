@@ -286,26 +286,36 @@ def list(folder_id, detailed):
 
 
 @cli.command()
-@click.argument('name')
-@click.option('--parent-folder-id', help='Parent folder ID (defaults to root)')
-def mkdir(name: str, parent_folder_id: Optional[str]):
-    """Create a new folder"""
+@click.argument('path')
+@click.option('--parent-folder-id', help='Parent folder ID (defaults to root). If used, path must be a single name.')
+def mkdir(path: str, parent_folder_id: Optional[str]):
+    """Create a new folder (supports paths like folder/subfolder)"""
     try:
+        # Ensure we are logged in
         credentials = auth_service.get_auth_details()
         
-        if not parent_folder_id:
-            parent_folder_id = credentials['user'].get('rootFolderId', '')
-            if not parent_folder_id:
-                click.echo("❌ No root folder ID found", err=True)
-                return
-        
-        click.echo(f"📁 Creating folder '{name}' in {parent_folder_id}...")
-        
-        folder = drive_service.create_folder(name, parent_folder_id)
-        
+        # CASE 1: User specified a specific parent UUID (Legacy/Strict mode)
+        if parent_folder_id:
+            if '/' in path or '\\' in path:
+                 click.echo("❌ Error: When providing --parent-folder-id, the name cannot contain slashes.", err=True)
+                 click.echo("💡 Tip: To create nested paths like 'A/B', do not use --parent-folder-id.", err=True)
+                 return
+
+            click.echo(f"📁 Creating single folder '{path}' in parent {parent_folder_id}...")
+            folder = drive_service.create_folder(path, parent_folder_id)
+            
+        # CASE 2: No parent ID specified (Smart Path mode)
+        else:
+            # Use the recursive function to handle "daten/phil" automatically
+            click.echo(f"📁 Creating folder path: {path}")
+            folder = drive_service.create_folder_recursive(path)
+
+        # Output success results
         folder_uuid = folder.get('uuid', folder.get('id', ''))
+        folder_name = folder.get('plainName', folder.get('name', path))
+        
         click.echo(f"✅ Folder created successfully!")
-        click.echo(f"📁 Name: {name}")
+        click.echo(f"📁 Name: {folder_name}")
         click.echo(f"🆔 UUID: {folder_uuid}")
         
     except Exception as e:
