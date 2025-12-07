@@ -20,7 +20,7 @@ try:
     from ..utils.api import api_client
     from .crypto import crypto_service
     from .auth import auth_service
-except ImportError:
+except (ImportError, ValueError):
     current_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(current_dir)
     if parent_dir not in sys.path:

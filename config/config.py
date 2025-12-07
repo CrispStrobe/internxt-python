@@ -116,10 +116,10 @@ class ConfigService:
         # Import crypto service here to avoid circular imports
         try:
             from ..services.crypto import crypto_service
-        except ImportError:
+        except (ImportError, ValueError):
             try:
                 from internxt_cli.services.crypto import crypto_service
-            except ImportError:
+            except (ImportError, ValueError):
                 current_dir = os.path.dirname(os.path.abspath(__file__))
                 parent_dir = os.path.dirname(current_dir)
                 if parent_dir not in sys.path:
@@ -180,10 +180,10 @@ class ConfigService:
             # Import crypto service here to avoid circular imports
             try:
                 from ..services.crypto import crypto_service
-            except ImportError:
+            except (ImportError, ValueError):
                 try:
                     from internxt_cli.services.crypto import crypto_service
-                except ImportError:
+                except (ImportError, ValueError):
                     current_dir = os.path.dirname(os.path.abspath(__file__))
                     parent_dir = os.path.dirname(current_dir)
                     if parent_dir not in sys.path:
