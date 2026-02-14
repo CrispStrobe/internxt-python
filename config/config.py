@@ -47,10 +47,11 @@ class ConfigService:
         self.webdav_default_protocol = 'https'
         self.webdav_default_timeout = 0
 
-        # EXACT match to TypeScript environment configuration from .env.template
         self.config = {
-            'DRIVE_WEB_URL': 'https://drive.internxt.com',
-            'DRIVE_NEW_API_URL': 'https://api.internxt.com/drive',
+            'DRIVE_NEW_API_URL' : "https://gateway.internxt.com/drive",
+            'NETWORK_URL' : "https://gateway.internxt.com/network",
+            #'DRIVE_WEB_URL': 'https://drive.internxt.com',
+            #'DRIVE_NEW_API_URL': 'https://api.internxt.com/drive',
             'NETWORK_URL': 'https://api.internxt.com',
             'APP_CRYPTO_SECRET': '6KYQBP847D4ATSFA',
             'APP_MAGIC_IV': 'd139cb9a2cd17092e79e1861cf9d7023',

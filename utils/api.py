@@ -12,20 +12,107 @@ from typing import Dict, Any, Optional, List
 
 from config.config import config_service
 
-class ApiClient:
-    """
-    HTTP client for Internxt API
-    """
+# utils/api.py
 
+class ApiClient:
     def __init__(self):
         self.session = requests.Session()
         self.drive_api_url = config_service.get('DRIVE_NEW_API_URL')
         self.network_url = config_service.get('NETWORK_URL')
+        
+        # Match rclone adapter - use internxt-client header only
         self.session.headers.update({
             'Content-Type': 'application/json',
-            'User-Agent': 'internxt-python-cli/4.0.0',
             'Accept': 'application/json',
+            'internxt-client': 'internxt-cli',  # This is the key header
         })
+
+    def _make_request(self, method: str, url: str, data: Optional[Any] = None, 
+                    headers: Optional[Dict[str, str]] = None, params: Optional[Dict[str, Any]] = None, 
+                    auth: Optional[tuple] = None, is_json=True) -> requests.Response:
+        """Central request handler, returns the full response object."""
+        try:
+            request_headers = self.session.headers.copy()
+            if headers:
+                request_headers.update(headers)
+            
+            # If basic auth is provided, it overrides the session's Bearer token
+            if auth:
+                request_headers.pop('Authorization', None)
+
+            json_payload = data if is_json else None
+            data_payload = data if not is_json else None
+
+            # Simply use session.request() - much cleaner!
+            response = self.session.request(
+                method, 
+                url, 
+                json=json_payload, 
+                data=data_payload,
+                params=params,  # ← params goes here
+                headers=request_headers, 
+                auth=auth, 
+                timeout=300
+            )
+            response.raise_for_status()
+            return response
+        except requests.exceptions.HTTPError as e:
+            error_message = f"HTTP {e.response.status_code} Error"
+            try: 
+                error_message = e.response.json().get("message", "Unknown Error")
+            except json.JSONDecodeError: 
+                pass
+            raise ValueError(f"API Error: {error_message}") from e
+        except requests.exceptions.RequestException as e:
+            raise ConnectionError(f"Network request failed for {url}: {e}") from e
+
+    # Robust wrapper to ensure return is always a dictionary
+    def post(self, url: str, data=None, **kwargs) -> Dict[str, Any]:
+        resp = self._make_request("POST", url, data=data, **kwargs)
+        return resp.json() if resp.content else {}
+
+    def get(self, url: str, **kwargs) -> Dict[str, Any]:
+        resp = self._make_request("GET", url, **kwargs)
+        return resp.json() if resp.content else {}
+
+    def robust_request(self, method, url, **kwargs):
+        """
+        Wrapper for requests with automatic 401 refresh logic and high verbosity.
+        """
+        try:
+            if 'headers' not in kwargs:
+                kwargs['headers'] = self.session.headers.copy()
+
+            print(f"📡 DEBUG: {method} {url}")
+            response = self.session.request(method, url, **kwargs)
+            
+            # Handle Expired Token
+            if response.status_code == 401:
+                print("🕒 DEBUG: Received 401. Attempting token rotation...")
+                from services.auth import auth_service
+                auth_service.refresh_tokens()
+                
+                # Re-fetch new credentials and retry
+                creds = config_service.read_user_credentials()
+                kwargs['headers']['Authorization'] = f"Bearer {creds['token']}"
+                print(f"🔄 DEBUG: Retrying {method} {url} with new token.")
+                response = self.session.request(method, url, **kwargs)
+                
+            response.raise_for_status()
+            return response.json() if response.content else {}
+            
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code
+            body = e.response.text
+            print(f"❌ DEBUG: HTTP {status} Failure. Body: {body}")
+            if status == 402:
+                print("💰 DEBUG: Payment Required. Check subscription status.")
+            elif status == 409:
+                print("🚫 DEBUG: Conflict error. Item already exists.")
+            raise ValueError(f"API Error ({status}): {body}")
+        except Exception as e:
+            print(f"💥 DEBUG: Request Exception: {str(e)}")
+            raise
 
     def set_auth_tokens(self, token: Optional[str], new_token: Optional[str]):
         """Sets the auth token for subsequent requests."""
@@ -48,47 +135,15 @@ class ApiClient:
         
         return response.json() if response.content else {}
 
-    def _make_request(self, method: str, url: str, data: Optional[Any] = None, 
-                      headers: Optional[Dict[str, str]] = None, params: Optional[Dict[str, Any]] = None, 
-                      auth: Optional[tuple] = None, is_json=True) -> requests.Response:
-        """Central request handler, returns the full response object."""
-        try:
-            request_headers = self.session.headers.copy()
-            if headers:
-                request_headers.update(headers)
-            
-            # If basic auth is provided, it overrides the session's Bearer token
-            if auth:
-                request_headers.pop('Authorization', None)
 
-            json_payload = data if is_json else None
-            data_payload = data if not is_json else None
-
-            response = requests.request(method, url, json=json_payload, data=data_payload, 
-                                        headers=request_headers, params=params, auth=auth, timeout=300)
-            response.raise_for_status()
-            return response
-        except requests.exceptions.HTTPError as e:
-            error_message = f"HTTP {e.response.status_code} Error"
-            try: 
-                error_message = e.response.json().get("message", "Unknown Error")
-            except json.JSONDecodeError: 
-                pass
-            raise ValueError(f"API Error: {error_message}") from e
-        except requests.exceptions.RequestException as e:
-            raise ConnectionError(f"Network request failed for {url}: {e}") from e
+    def security_details(self, email: str) -> Dict[str, Any]:
+        """Strictly formatted security check."""
+        url = f"{self.drive_api_url}/auth/login"
+        # The email must be lowercase and stripped
+        payload = {'email': email.lower().strip()}
+        return self.post(url, data=payload)
 
     # ========== HTTP VERB METHODS ==========
-
-    def get(self, url: str, params: Dict[str, Any] = None, headers: Dict[str, str] = None, auth: Optional[tuple] = None) -> Dict[str, Any]:
-        """Make GET request and return JSON"""
-        response = self._make_request("GET", url, params=params, headers=headers, auth=auth)
-        return response.json() if response.content else {}
-    
-    def post(self, url: str, data: Dict[str, Any] = None, headers: Dict[str, str] = None, auth: Optional[tuple] = None) -> Dict[str, Any]:
-        """Make POST request and return JSON"""
-        response = self._make_request("POST", url, data=data, headers=headers, auth=auth)
-        return response.json() if response.content else {}
 
     def delete(self, url: str, headers: Dict[str, str] = None, auth: Optional[tuple] = None) -> Dict[str, Any]:
         """Make DELETE request and return JSON"""
@@ -107,14 +162,12 @@ class ApiClient:
 
     # ========== AUTH API ENDPOINTS ==========
 
-    def security_details(self, email: str) -> Dict[str, Any]:
-        """Gets security details (sKey and 2FA status)."""
-        url = f"{self.drive_api_url}/auth/login"
-        return self.post(url, data={'email': email})
-
     def login_access(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Performs the final login with the encrypted password hash and keys."""
+        """Performs the final login."""
         url = f"{self.drive_api_url}/auth/login/access"
+        # Ensure the email inside the nested payload is also clean
+        if 'email' in payload:
+            payload['email'] = payload['email'].lower().strip()
         return self.post(url, data=payload)
 
     # ========== STORAGE API ENDPOINTS ==========
@@ -123,13 +176,13 @@ class ApiClient:
         """Get subfolders in folder"""
         url = f"{self.drive_api_url}/folders/content/{folder_uuid}/folders"
         params = {'offset': offset, 'limit': limit, 'sort': 'plainName', 'direction': 'ASC'}
-        return self.get(url, params)
+        return self.get(url, params=params)
 
     def get_folder_files(self, folder_uuid: str, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
         """Get files in folder"""
         url = f"{self.drive_api_url}/folders/content/{folder_uuid}/files"
         params = {'offset': offset, 'limit': limit, 'sort': 'plainName', 'direction': 'ASC'}
-        return self.get(url, params)
+        return self.get(url, params=params)
 
     def create_folder(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -273,7 +326,7 @@ class ApiClient:
         """
         url = f"{self.drive_api_url}/storage/trash/paginated"
         params = {'offset': offset, 'limit': limit, 'type': item_type}
-        return self.get(url, params)
+        return self.get(url, params=params)
 
     def clear_trash(self) -> Dict[str, Any]:
         """
@@ -314,7 +367,7 @@ class ApiClient:
         """
         url = f"{self.drive_api_url}/folders/meta"
         params = {'path': folder_path}
-        return self.get(url, params)
+        return self.get(url, params=params)
 
     def get_file_by_path(self, file_path: str) -> Dict[str, Any]:
         """
@@ -323,7 +376,7 @@ class ApiClient:
         """
         url = f"{self.drive_api_url}/files/meta"
         params = {'path': file_path}
-        return self.get(url, params)
+        return self.get(url, params=params)
 
     # ========== NETWORK API ENDPOINTS ==========
     
@@ -391,7 +444,7 @@ class ApiClient:
         """
         url = f"{self.drive_api_url}/fuzzy/{query}"
         params = {'offset': offset}
-        return self.get(url, params)
+        return self.get(url, params=params)
 
     # ========== UTILITY OPERATIONS ==========
     

@@ -4,6 +4,7 @@ internxt_cli/services/auth.py
 Authentication service for Internxt CLI
 """
 import base64
+import hashlib
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
@@ -27,128 +28,98 @@ class AuthService:
             print(f"    ⚠️  Could not determine 2FA status. Reason: {e}")
             return False
 
+    def compute_bridge_auth(self, bridge_user: str, user_id: str) -> tuple:
+        """
+        Creates the Basic Auth tuple for the Internxt Network/Bridge API.
+        The password is the SHA256 hash of the UserID.
+        """
+        print(f"🔐 DEBUG: Computing Bridge Auth for UserID: {user_id}")
+        hashed_pass = hashlib.sha256(str(user_id).encode()).hexdigest()
+        # Returns tuple for requests (user, pass)
+        return (bridge_user, hashed_pass)
+
     def do_login(self, email: str, password: str, tfa_code: Optional[str] = None) -> Dict[str, Any]:
         """
-        Performs the full login flow and correctly handles credentials.
+        Performs the modern Hydrated Login Flow.
         """
-        # Step 1: Get security details
-        security_details = self.api.security_details(email)
-        encrypted_salt = security_details.get('sKey')
-        if not encrypted_salt:
-            raise ValueError("Login failed: Did not receive encryptedSalt (sKey) from security details.")
+        clean_email = email.lower().strip()
+        print(f"🚀 TRACE: Starting Hydrated Login for {clean_email}")
+        
+        # Step 1: Security Details (SDK: securityDetails)
+        # Returns the encryption salt (sKey)
+        sec_details = self.api.security_details(clean_email)
+        s_key = sec_details.get('sKey')
+        if not s_key:
+            raise ValueError(f"Login failed: Salt (sKey) missing. Response: {sec_details}")
 
-        # Step 2: Perform client-side crypto operations
-        print("    Performing client-side crypto operations...")
-        encrypted_password_hash = self.crypto.encrypt_password_hash(password, encrypted_salt)
+        # Step 2: Client-side Crypto
+        encrypted_password_hash = self.crypto.encrypt_password_hash(password, s_key)
         keys_payload = self.crypto.generate_keys(password)
-        print("    ✅ Crypto operations complete.")
 
-        # Step 3: Construct the final payload
-        final_payload = {
-            'email': email.lower(), 'password': encrypted_password_hash, 'tfa': tfa_code,
+        # Step 3: Access Call (SDK: loginAccess)
+        # Sends the encrypted hash and the public/private key pairs
+        login_payload = {
+            'email': clean_email,
+            'password': encrypted_password_hash,
+            'tfa': tfa_code,
             'keys': {
-                'ecc': { 'publicKey': keys_payload['ecc']['publicKey'], 'privateKey': keys_payload['ecc']['privateKeyEncrypted'] },
-                'kyber': keys_payload['kyber']
+                'ecc': {
+                    'publicKey': keys_payload['ecc']['publicKey'],
+                    'privateKey': keys_payload['ecc']['privateKeyEncrypted']
+                }
             },
-            'privateKey': keys_payload['privateKeyEncrypted'], 'publicKey': keys_payload['publicKey'],
-            'revocationKey': keys_payload['revocationCertificate'],
+            'privateKey': keys_payload['privateKeyEncrypted'],
+            'publicKey': keys_payload['publicKey']
         }
-
-        # Step 4: Make the final login call
-        response = self.api.login_access(final_payload)
-
-        user_data, token, new_token = response.get('user'), response.get('token'), response.get('newToken')
-        if not all([user_data, token, new_token]):
-            raise ValueError("Login failed: Final API response was missing 'user', 'token', or 'newToken'")
-
-        print("    ✅ Full login successful!")
-
-        # Step 5: CORRECTLY HANDLE CREDENTIALS
-        # CRITICAL FIX: The mnemonic is ENCRYPTED with the user's password!
-        encrypted_mnemonic = user_data.get('mnemonic')
-        if not encrypted_mnemonic:
-            raise ValueError("Login failed: Mnemonic not found in user data.")
         
-        # Decrypt the mnemonic using the user's password
-        try:
-            clear_mnemonic = self.crypto.decrypt_text_with_key(encrypted_mnemonic, password)
-            print(f"    ✅ Mnemonic decrypted successfully ({len(clear_mnemonic.split())} words)")
-        except Exception as e:
-            raise ValueError(f"Login failed: Could not decrypt mnemonic: {e}")
-        
-        # Validate the decrypted mnemonic
-        if not self.crypto.validate_mnemonic(clear_mnemonic):
-            raise ValueError("Login failed: Decrypted mnemonic is invalid")
-        
-        # Handle private key (this part can stay as is)
-        clear_private_key = ""
-        encrypted_pk = user_data.get('privateKey', '')
-        
-        if encrypted_pk:
-            try:
-                # Check if it looks like a PGP private key (already decrypted)
-                if '-----BEGIN PGP PRIVATE KEY BLOCK-----' in encrypted_pk:
-                    clear_private_key = encrypted_pk
-                else:
-                    # It's encrypted - try to decrypt it
-                    try:
-                        # Try as base64 first
-                        import base64
-                        encrypted_pk_bytes = base64.b64decode(encrypted_pk)
-                        encrypted_pk_hex = encrypted_pk_bytes.hex()
-                    except:
-                        # Assume it's already hex
-                        encrypted_pk_hex = encrypted_pk
-                    
-                    clear_private_key = self.crypto.decrypt_text_with_key(encrypted_pk_hex, clear_mnemonic)
-            except Exception as e:
-                # If decryption fails, it might already be decrypted or not needed
-                print(f"    ℹ️  Note: Private key handling: {str(e)[:50]}...")
-                clear_private_key = encrypted_pk
+        print("🔐 TRACE: Requesting initial session token...")
+        access_res = self.api.login_access(login_payload)
+        temp_token = access_res.get('newToken')
 
-        clear_user = {**user_data, 'mnemonic': clear_mnemonic, 'privateKey': clear_private_key}
-
+        # Step 4: HYDRATION (Mandatory Refresh)
+        # Modern Internxt requires calling /refresh to populate storage cluster metadata
+        print("💧 TRACE: Hydrating session metadata (bucket, userId, bridgeUser)...")
+        hydrated = self.api.refresh_token(temp_token)
+        
+        user_data = hydrated['user']
+        
+        # Compute Bridge credentials for Object Storage auth
+        import hashlib
+        bridge_pass = hashlib.sha256(str(user_data['userId']).encode()).hexdigest()
+        
+        # Final construction including the decrypted mnemonic
         return {
-            'user': clear_user, 'token': token, 'newToken': new_token,
-            'lastLoggedInAt': datetime.now(timezone.utc).isoformat(),
-            'lastTokenRefreshAt': datetime.now(timezone.utc).isoformat(),
+            'user': {
+                **user_data,
+                'mnemonic': self.crypto.decrypt_text_with_key(user_data['mnemonic'], password),
+                'bridgePass': bridge_pass
+            },
+            'token': hydrated['token'],
+            'newToken': hydrated['newToken'],
+            'lastLoggedInAt': datetime.now(timezone.utc).isoformat()
         }
-    
+
     def refresh_tokens(self) -> Dict[str, Any]:
-        """
-        Refreshes and saves auth tokens.
-        """
+        """Rotates tokens and updates bridge auth if user metadata changed."""
+        creds = self.config.read_user_credentials()
+        print(f"🔄 DEBUG: Refreshing tokens for {creds['user']['email']}")
+        
         try:
-            # 1. Get current (stale) credentials from disk
-            creds = self.config.read_user_credentials()
-            current_new_token = creds.get('newToken')
-            if not current_new_token:
-                raise ValueError("No 'newToken' found to refresh.")
+            resp = self.api.refresh_token(creds['newToken'])
             
-            # 2. Call the API to refresh (using the function we just added to api.py)
-            refresh_response = self.api.refresh_token(current_new_token)
-            
-            new_token = refresh_response.get('token')      # The new access token
-            new_new_token = refresh_response.get('newToken') # The new (refreshed) session token
-            
-            if not new_token or not new_new_token:
-                raise ValueError("Refresh response did not contain new tokens.")
-            
-            # 3. Update and save credentials
-            creds['token'] = new_token
-            creds['newToken'] = new_new_token
-            creds['lastTokenRefreshAt'] = datetime.now(timezone.utc).isoformat()
+            # Update tokens and bridge auth
+            creds['token'] = resp['token']
+            creds['newToken'] = resp['newToken']
+            creds['user']['bridgeAuth'] = self.compute_bridge_auth(
+                resp['user']['bridgeUser'], resp['user']['userId']
+            )
             
             self.config.save_user_credentials(creds)
-            
-            # 4. Update the global api_client for the current session
-            self.api.set_auth_tokens(new_token, new_new_token)
-            
+            self.api.set_auth_tokens(creds['token'], creds['newToken'])
             return creds
-            
         except Exception as e:
-            # If refresh fails, re-raise. The user must log in again.
-            raise Exception(f"Token refresh failed: {e}. Please login again.") from e
+            print(f"❌ DEBUG: Token rotation failed: {e}")
+            raise
 
     def login(self, email: str, password: str, tfa_code: Optional[str] = None) -> Dict[str, Any]:
         credentials = self.do_login(email, password, tfa_code)

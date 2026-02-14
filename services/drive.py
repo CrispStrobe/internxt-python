@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from tqdm import tqdm
 import time
+import uuid
 import threading
 
-# Fix imports to work both as module and direct script
 try:
     from ..config.config import config_service
     from ..utils.api import api_client
@@ -413,6 +413,49 @@ class DriveService:
                 return self.api.trash_folder(item_uuid)
         except Exception as e:
             raise Exception(f"Failed to trash item {item_uuid}: {e}")
+        
+    def upload_with_safety_pattern(self, local_path: Path, remote_folder_uuid: str, filename: str):
+        """
+        Safe Upload Flow:
+        1. Rename existing file to .backup
+        2. Upload new file
+        3. If success: delete .backup
+        4. If fail: rename .backup back to original
+        """
+        # Check if file exists
+        full_path = f"/{filename}" # Simplified for example
+        existing_item = None
+        try:
+            existing_item = self.resolve_path(full_path)
+        except FileNotFoundError:
+            pass
+
+        backup_uuid = None
+        orig_name = filename
+        
+        if existing_item and existing_item['type'] == 'file':
+            backup_name = f"{filename}.bak-{uuid.uuid4().hex[:6]}"
+            print(f"⚠️ DEBUG: File conflict. Creating safety backup: {backup_name}")
+            self.api.rename_file(existing_item['uuid'], backup_name)
+            backup_uuid = existing_item['uuid']
+
+        try:
+            # Perform actual upload
+            print(f"📤 DEBUG: Uploading {filename} to {remote_folder_uuid}...")
+            new_file = self.upload_file_to_folder(str(local_path), remote_folder_uuid)
+            
+            # Success: Cleanup backup
+            if backup_uuid:
+                print(f"🗑️ DEBUG: Upload successful. Purging backup {backup_uuid}")
+                self.api.delete_permanently(backup_uuid, "file")
+            return new_file
+
+        except Exception as e:
+            # Failure: Rollback
+            if backup_uuid:
+                print(f"🚨 DEBUG: Upload FAILED. Rolling back backup to {orig_name}")
+                self.api.rename_file(backup_uuid, orig_name)
+            raise e
 
     def update_file(self, file_uuid: str, local_path: str) -> Dict[str, Any]:
         """Update existing file with new content (WebDAV required for PUT operations)"""
