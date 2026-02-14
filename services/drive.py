@@ -672,6 +672,11 @@ class DriveService:
         display_name = f"{file_name}.{file_extension}" if file_extension else file_name
         print(f"     📤 Uploading '{display_name}' ({self._format_size(file_size)})...")
         
+        # Calculate dynamic timeout based on file size (assume 100 KB/s minimum speed)
+        min_speed_kbps = 100  # 100 KB/s
+        timeout_seconds = max(300, int(file_size / (min_speed_kbps * 1024)) + 60)
+        print(f"     ⏱️  Upload timeout: {timeout_seconds}s (~{timeout_seconds//60} minutes)")
+        
         # Log timestamp preservation attempt
         if creation_time or modification_time:
             print(f"     🕐 Attempting to preserve timestamps:")
@@ -686,92 +691,162 @@ class DriveService:
         except Exception as e:
             raise IOError(f"Failed to read file {file_path}: {e}")
         
-        with tqdm(total=5, desc="     Uploading", unit="step", 
-                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]', 
-                leave=False) as pbar:
+        # Retry logic for the entire upload
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with tqdm(total=5, desc="     Uploading", unit="step", 
+                        bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]', 
+                        leave=False) as pbar:
+                    
+                    pbar.set_description("     🔐 Encrypting")
+                    encrypted_data, file_index_hex = self.crypto.encrypt_stream_internxt_protocol(
+                        plaintext, mnemonic, bucket_id
+                    )
+                    pbar.update(1)
+
+                    pbar.set_description("     🚀 Initializing")
+                    start_response = self.api.start_upload(bucket_id, len(encrypted_data), auth=network_auth)
+                    upload_details = start_response['uploads'][0]
+                    upload_url = upload_details['url']
+                    file_network_uuid = upload_details['uuid']
+                    pbar.update(1)
+
+                    pbar.set_description("     ☁️  Uploading")
+                    # Use custom timeout for large files
+                    self._upload_chunk_with_timeout(upload_url, encrypted_data, timeout_seconds)
+                    pbar.update(1)
+
+                    pbar.set_description("     ✅ Finalizing")
+                    encrypted_hash = hashlib.sha256(encrypted_data).hexdigest()
+                    
+                    finish_payload = {
+                        'index': file_index_hex,
+                        'shards': [{'hash': encrypted_hash, 'uuid': file_network_uuid}]
+                    }
+                    finish_response = self.api.finish_upload(bucket_id, finish_payload, auth=network_auth)
+                    network_file_id = finish_response['id']
+                    pbar.update(1)
+
+                    pbar.set_description("     📋 Creating entry")
+                    file_entry_payload = {
+                        'folderUuid': destination_folder_uuid,
+                        'plainName': file_name,
+                        'type': file_extension if file_extension else '',
+                        'size': file_size,
+                        'bucket': bucket_id,
+                        'fileId': network_file_id,
+                        'encryptVersion': 'Aes03',
+                        'name': ''
+                    }
+                    
+                    # Add timestamps using SDK-compatible field names
+                    if creation_time:
+                        file_entry_payload['creationTime'] = creation_time
+                    if modification_time:
+                        file_entry_payload['modificationTime'] = modification_time
+                    
+                    created_file = self.api.create_file_entry(file_entry_payload)
+                    pbar.update(1)
+
+                    with self.cache_lock:
+                        cached_item = self.folder_content_cache.get(destination_folder_uuid)
+                        if cached_item:
+                            cache_time, content = cached_item
+                            content['files'].append(created_file)
+                            self.folder_content_cache[destination_folder_uuid] = (cache_time, content)
+                    
+                    # Verify if timestamps were actually set
+                    if creation_time or modification_time:
+                        returned_creation = created_file.get('creationTime') or created_file.get('createdAt')
+                        returned_modification = created_file.get('modificationTime') or created_file.get('updatedAt')
+                        
+                        if creation_time and returned_creation:
+                            print(f"     ✅ Creation timestamp preserved: {returned_creation}")
+                        elif creation_time:
+                            print(f"     ⚠️  Creation timestamp NOT set (API returned: {returned_creation})")
+                        
+                        if modification_time and returned_modification:
+                            print(f"     ✅ Modification timestamp preserved: {returned_modification}")
+                        elif modification_time:
+                            print(f"     ⚠️  Modification timestamp NOT set (API returned: {returned_modification})")
+                
+                return created_file  # Success!
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    print(f"\n     ⚠️  Upload failed (attempt {attempt+1}/{max_retries}): {e}")
+                    print(f"     ⏳ Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    raise Exception(f"Upload failed after {max_retries} attempts: {e}")
+
+    def _upload_chunk_with_timeout(self, upload_url: str, chunk_data: bytes, timeout_seconds: int):
+        """Upload chunk with custom timeout and progress tracking"""
+        import requests
+        from tqdm import tqdm
+        
+        # Create a custom session with longer timeout
+        session = requests.Session()
+        
+        # Upload with progress bar
+        class TqdmUpload:
+            def __init__(self, total_size):
+                self.pbar = tqdm(
+                    total=total_size,
+                    unit='B',
+                    unit_scale=True,
+                    desc='          ',
+                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}]',
+                    leave=False
+                )
+                self.uploaded = 0
+            
+            def __call__(self, chunk):
+                self.uploaded += len(chunk)
+                self.pbar.update(len(chunk))
+                return chunk
+            
+            def close(self):
+                self.pbar.close()
+        
+        # For large uploads, show progress
+        if len(chunk_data) > 10 * 1024 * 1024:  # > 10MB
+            progress = TqdmUpload(len(chunk_data))
+            
+            # Split into smaller chunks for progress tracking
+            chunk_size = 1024 * 1024  # 1MB upload chunks for progress
+            uploaded = 0
+            
+            # Use streaming upload
+            def data_generator():
+                nonlocal uploaded
+                while uploaded < len(chunk_data):
+                    chunk = chunk_data[uploaded:uploaded + chunk_size]
+                    uploaded += len(chunk)
+                    progress.pbar.update(len(chunk))
+                    yield chunk
             
             try:
-                pbar.set_description("     🔐 Encrypting")
-                encrypted_data, file_index_hex = self.crypto.encrypt_stream_internxt_protocol(
-                    plaintext, mnemonic, bucket_id
+                response = session.put(
+                    upload_url,
+                    data=data_generator(),
+                    headers={'Content-Type': 'application/octet-stream'},
+                    timeout=timeout_seconds
                 )
-                pbar.update(1)
-
-                pbar.set_description("     🚀 Initializing")
-                start_response = self.api.start_upload(bucket_id, len(encrypted_data), auth=network_auth)
-                upload_details = start_response['uploads'][0]
-                upload_url = upload_details['url']
-                file_network_uuid = upload_details['uuid']
-                pbar.update(1)
-
-                pbar.set_description("     ☁️  Uploading")
-                self.api.upload_chunk(upload_url, encrypted_data)
-                pbar.update(1)
-
-                pbar.set_description("     ✅ Finalizing")
-                encrypted_hash = hashlib.sha256(encrypted_data).hexdigest()
-                
-                finish_payload = {
-                    'index': file_index_hex,
-                    'shards': [{'hash': encrypted_hash, 'uuid': file_network_uuid}]
-                }
-                finish_response = self.api.finish_upload(bucket_id, finish_payload, auth=network_auth)
-                network_file_id = finish_response['id']
-                pbar.update(1)
-
-                pbar.set_description("     📋 Creating entry")
-                file_entry_payload = {
-                    'folderUuid': destination_folder_uuid,
-                    'plainName': file_name,
-                    'type': file_extension if file_extension else '',
-                    'size': file_size,
-                    'bucket': bucket_id,
-                    'fileId': network_file_id,
-                    'encryptVersion': 'Aes03',
-                    'name': ''
-                }
-                
-                # Add timestamps using SDK-compatible field names
-                if creation_time:
-                    file_entry_payload['creationTime'] = creation_time
-                    print(f"     🕐 Added creationTime to payload")
-                if modification_time:
-                    file_entry_payload['modificationTime'] = modification_time
-                    print(f"     🕐 Added modificationTime to payload")
-                
-                created_file = self.api.create_file_entry(file_entry_payload)
-                pbar.update(1)
-
-                with self.cache_lock:
-                    cached_item = self.folder_content_cache.get(destination_folder_uuid)
-                    if cached_item:
-                        cache_time, content = cached_item
-                        # Add new file to the 'files' list in the cache
-                        content['files'].append(created_file)
-                        # Save the updated cache content
-                        self.folder_content_cache[destination_folder_uuid] = (cache_time, content)
-                        print(f"  -> Cache updated for parent: {destination_folder_uuid}")
-                
-                # Verify if timestamps were actually set
-                if creation_time or modification_time:
-                    returned_creation = created_file.get('creationTime') or created_file.get('createdAt')
-                    returned_modification = created_file.get('modificationTime') or created_file.get('updatedAt')
-                    
-                    if creation_time and returned_creation:
-                        print(f"     ✅ Creation timestamp preserved: {returned_creation}")
-                    elif creation_time:
-                        print(f"     ⚠️  Creation timestamp NOT set (API returned: {returned_creation})")
-                    
-                    if modification_time and returned_modification:
-                        print(f"     ✅ Modification timestamp preserved: {returned_modification}")
-                    elif modification_time:
-                        print(f"     ⚠️  Modification timestamp NOT set (API returned: {returned_modification})")
-            
-            except Exception as e:
-                pbar.close()
-                raise Exception(f"Upload failed: {e}")
-        
-        return created_file
+                response.raise_for_status()
+            finally:
+                progress.close()
+        else:
+            # Small file - direct upload
+            response = session.put(
+                upload_url,
+                data=chunk_data,
+                headers={'Content-Type': 'application/octet-stream'},
+                timeout=timeout_seconds
+            )
+            response.raise_for_status()
 
     # ========== CORE OPERATIONS ==========
 
