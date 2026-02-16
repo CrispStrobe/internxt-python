@@ -434,6 +434,23 @@ class ApiClient:
         """
         url = f"{self.drive_api_url}/files/{file_uuid}"
         return self.put(url, data=payload)
+    
+    def move_file(self, file_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
+        """
+        SDK MATCH: PATCH /files/{fileUuid} with destinationFolder field.
+        """
+        url = f"{self.drive_api_url}/files/{file_uuid}"
+        # Use 'destinationFolder' as required by the modern API
+        data = {'destinationFolder': destination_folder_uuid}
+        return self.patch(url, data=data)
+
+    def move_folder(self, folder_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
+        """
+        SDK MATCH: PATCH /folders/{folderUuid} with destinationFolder field.
+        """
+        url = f"{self.drive_api_url}/folders/{folder_uuid}"
+        data = {'destinationFolder': destination_folder_uuid}
+        return self.patch(url, data=data)
 
     # ========== SEARCH OPERATIONS ==========
 

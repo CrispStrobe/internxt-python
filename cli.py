@@ -322,6 +322,33 @@ def mkdir(path: str, parent_folder_id: Optional[str]):
         error_msg = str(e)
         click.echo(f"❌ Error creating folder: {error_msg}", err=True)
 
+# cli.py
+
+@cli.command('mv')
+@click.argument('source_path')
+@click.argument('target_path')
+@click.option('--verbose', '-v', is_flag=True, help='Enable high verbosity tracing')
+def move_path(source_path: str, target_path: str, verbose: bool):
+    """
+    Move a file or folder to a new destination path.
+    Example: python cli.py mv /Documents/file.txt /Archive
+    """
+    try:
+        # Ensure we have a fresh, hydrated session
+        auth_service.get_auth_details()
+        
+        click.echo(f"🚚 Moving '{source_path}'...")
+        drive_service.move_by_path(source_path, target_path)
+        
+        click.echo(f"✅ Successfully moved to {target_path}")
+        
+    except Exception as e:
+        click.echo(f"❌ Move operation failed: {e}", err=True)
+        if verbose:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
+
 @cli.command()
 @click.argument('sources', nargs=-1, type=str)
 @click.option('--target', '-t', 'target_path', default='/', help='Destination path on Internxt Drive (default: /)')
