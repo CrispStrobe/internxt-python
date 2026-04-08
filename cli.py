@@ -327,23 +327,244 @@ def mkdir(path: str, parent_folder_id: Optional[str]):
 # cli.py
 
 @cli.command('mv')
-@click.argument('source_path')
-@click.argument('target_path')
-@click.option('--verbose', '-v', is_flag=True, help='Enable high verbosity tracing')
-def move_path(source_path: str, target_path: str, verbose: bool):
+@click.argument('paths', nargs=-1, required=True)
+@click.option('--workers', '-w', type=int, default=4, show_default=True,
+              help='Parallel move workers (1 = serial)')
+@click.option('--on-conflict', type=click.Choice(['skip', 'overwrite'], case_sensitive=False),
+              default='skip', show_default=True,
+              help='Action when target folder already contains an item with the same name')
+@click.option('--dry-run', '-n', is_flag=True, help='Show what would be moved without making changes')
+@click.option('--verbose', '-v', is_flag=True, help='Show per-item progress')
+def move_path(paths: Tuple[str, ...], workers: int, on_conflict: str,
+              dry_run: bool, verbose: bool):
     """
-    Move a file or folder to a new destination path.
-    Example: python cli.py mv /Documents/file.txt /Archive
+    Move one or more files/folders into a target folder.
+
+    The LAST argument is the target folder. All preceding arguments are
+    sources. Wildcards (*, ?, [seq]) are supported in the leaf segment of
+    a source path and are matched against the remote folder listing.
+
+    Examples:
+      mv /Docs/file.txt /Archive
+      mv /Docs/a.pdf /Docs/b.pdf /Docs/c.pdf /Archive
+      mv "/Photos/2016/*.JPG" /Archive/2016
+      mv "/Photos/2016/IMG_????.JPG" /Archive/2016 -w 8
     """
+    if len(paths) < 2:
+        click.echo("❌ Need at least one source and a target folder.", err=True)
+        sys.exit(1)
+
+    *sources, target_path = paths
+
     try:
-        # Ensure we have a fresh, hydrated session
         auth_service.get_auth_details()
-        
-        click.echo(f"🚚 Moving '{source_path}'...")
-        drive_service.move_by_path(source_path, target_path)
-        
-        click.echo(f"✅ Successfully moved to {target_path}")
-        
+
+        # ===== Resolve target folder once =====
+        try:
+            target_info = drive_service.resolve_path(target_path)
+        except FileNotFoundError:
+            click.echo(f"❌ Target folder not found: {target_path}", err=True)
+            sys.exit(1)
+        if target_info['type'] != 'folder':
+            click.echo(f"❌ Target '{target_path}' is a file, not a folder.", err=True)
+            sys.exit(1)
+        target_uuid = target_info['uuid']
+        target_resolved_path = target_info['path']
+
+        # Pre-fetch target listing once for conflict detection.
+        target_existing: Dict[str, Dict[str, Any]] = {}
+        try:
+            target_content = drive_service.get_folder_content(target_uuid)
+            for f in target_content.get('files', []):
+                plain = f.get('plainName', '') or f.get('name', '')
+                ext = f.get('type', '') or ''
+                name = f"{plain}.{ext}" if ext else plain
+                target_existing[name] = {'type': 'file', 'uuid': f.get('uuid')}
+            for d in target_content.get('folders', []):
+                name = d.get('plainName') or d.get('name')
+                if name:
+                    target_existing[name] = {'type': 'folder', 'uuid': d.get('uuid')}
+        except Exception as e:
+            if verbose:
+                click.echo(f"⚠️  Could not pre-scan target folder: {e}")
+
+        # ===== Expand sources (wildcards + literals) =====
+        import fnmatch
+        # Each entry: (display_path, type, uuid, leaf_name)
+        expanded: List[Tuple[str, str, str, str]] = []
+        not_found: List[str] = []
+
+        def _is_glob(s: str) -> bool:
+            return any(c in s for c in '*?[')
+
+        for src in sources:
+            if _is_glob(src):
+                # Split into parent + leaf pattern
+                if '/' in src:
+                    parent_path = src.rsplit('/', 1)[0] or '/'
+                    leaf_pattern = src.rsplit('/', 1)[1]
+                else:
+                    parent_path = '/'
+                    leaf_pattern = src
+
+                try:
+                    listing = drive_service.list_folder_with_paths(parent_path)
+                except Exception as e:
+                    click.echo(f"❌ Could not list parent of '{src}': {e}", err=True)
+                    continue
+
+                matched_any = False
+                for f in listing.get('files', []):
+                    name = f.get('display_name') or f.get('plainName', '')
+                    if fnmatch.fnmatch(name, leaf_pattern):
+                        expanded.append((f.get('path', f"{parent_path}/{name}"),
+                                         'file', f['uuid'], name))
+                        matched_any = True
+                for d in listing.get('folders', []):
+                    name = d.get('display_name') or d.get('plainName', '')
+                    if fnmatch.fnmatch(name, leaf_pattern):
+                        expanded.append((d.get('path', f"{parent_path}/{name}"),
+                                         'folder', d['uuid'], name))
+                        matched_any = True
+                if not matched_any:
+                    not_found.append(src)
+            else:
+                try:
+                    info = drive_service.resolve_path(src)
+                    leaf = info['path'].rsplit('/', 1)[-1] or info['path']
+                    expanded.append((info['path'], info['type'], info['uuid'], leaf))
+                except FileNotFoundError:
+                    not_found.append(src)
+                except Exception as e:
+                    click.echo(f"❌ Error resolving '{src}': {e}", err=True)
+                    not_found.append(src)
+
+        for missing in not_found:
+            click.echo(f"⚠️  Not found: {missing}", err=True)
+
+        if not expanded:
+            click.echo("❌ Nothing to move.", err=True)
+            sys.exit(1)
+
+        # Refuse to move an item into its current parent (no-op + confusing).
+        # Also refuse to move a folder into itself / its descendant — but the
+        # API will reject that, so we let it through and report the error.
+        filtered: List[Tuple[str, str, str, str]] = []
+        for entry in expanded:
+            src_path, kind, uuid, leaf = entry
+            src_parent = src_path.rsplit('/', 1)[0] or '/'
+            if src_parent == target_resolved_path:
+                if verbose:
+                    click.echo(f"  ⏭️  Already in target: {src_path}")
+                continue
+            filtered.append(entry)
+        expanded = filtered
+
+        if not expanded:
+            click.echo("✅ All sources are already in the target folder; nothing to do.")
+            return
+
+        click.echo(f"🚚 Moving {len(expanded)} item(s) → {target_resolved_path}")
+        if dry_run:
+            click.echo("🔬 DRY RUN — no changes will be made")
+
+        # ===== Conflict resolution pass =====
+        # Decide per-item action: 'move', 'skip', or 'overwrite-then-move'.
+        # Done sequentially before parallel execution so the user sees a
+        # clean plan and we can short-circuit on dry-run.
+        plan: List[Tuple[str, str, str, str, str]] = []  # + action
+        skipped_count = 0
+        for src_path, kind, uuid, leaf in expanded:
+            existing = target_existing.get(leaf)
+            if existing is None:
+                plan.append((src_path, kind, uuid, leaf, 'move'))
+                continue
+            if on_conflict == 'skip':
+                if verbose or dry_run:
+                    click.echo(f"  ⏭️  Skip (target has {leaf}): {src_path}")
+                skipped_count += 1
+                continue
+            # overwrite
+            if existing['type'] == 'folder':
+                click.echo(f"  ❌ Refusing to overwrite folder at target: {leaf}", err=True)
+                skipped_count += 1
+                continue
+            plan.append((src_path, kind, uuid, leaf, 'overwrite'))
+
+        if dry_run:
+            for src_path, kind, _uuid, _leaf, action in plan:
+                marker = "🔁" if action == 'overwrite' else "➡️"
+                click.echo(f"  {marker} {kind}: {src_path}")
+            click.echo(f"📊 Would move: {len(plan)}, skipped: {skipped_count}")
+            return
+
+        # ===== Parallel execution =====
+        success_count = 0
+        error_count = 0
+        counters_lock = threading.Lock()
+        log_lock = threading.Lock()
+
+        def _safe_log(msg: str, err: bool = False) -> None:
+            with log_lock:
+                click.echo(msg, err=err)
+
+        def _do_move(item: Tuple[str, str, str, str, str]) -> Tuple[str, str]:
+            src_path, kind, uuid, leaf, action = item
+            try:
+                if action == 'overwrite':
+                    existing = target_existing.get(leaf)
+                    if existing and existing['type'] == 'file':
+                        try:
+                            drive_service.delete_permanently_file(existing['uuid'])
+                        except Exception as del_err:
+                            return ('error', f"{src_path}: could not remove existing target ({del_err})")
+                if kind == 'file':
+                    drive_service.move_file(uuid, target_uuid)
+                else:
+                    drive_service.move_folder(uuid, target_uuid)
+                return ('ok', src_path)
+            except Exception as move_err:
+                return ('error', f"{src_path}: {move_err}")
+
+        max_workers = max(1, min(workers, len(plan)))
+        if verbose:
+            click.echo(f"  🧵 Using {max_workers} worker(s)")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_do_move, item) for item in plan]
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    status, detail = fut.result()
+                except Exception as fut_err:
+                    _safe_log(f"  ❌ Worker exception: {fut_err}", err=True)
+                    with counters_lock:
+                        error_count += 1
+                    continue
+                if status == 'ok':
+                    with counters_lock:
+                        success_count += 1
+                    if verbose:
+                        _safe_log(f"  ✅ {detail}")
+                else:
+                    with counters_lock:
+                        error_count += 1
+                    _safe_log(f"  ❌ {detail}", err=True)
+
+        # Final cache invalidation for the target (move_file/move_folder
+        # already pop both source-parent and target, but be explicit).
+        with drive_service.cache_lock:
+            drive_service.folder_content_cache.pop(target_uuid, None)
+
+        click.echo("=" * 40)
+        click.echo(f"📊 Move Summary:")
+        click.echo(f"  ✅ Moved:    {success_count}")
+        click.echo(f"  ⏭️  Skipped:  {skipped_count}")
+        click.echo(f"  ❌ Errors:   {error_count}")
+        click.echo("=" * 40)
+
+        if error_count:
+            sys.exit(1)
+
     except Exception as e:
         click.echo(f"❌ Move operation failed: {e}", err=True)
         if verbose:
