@@ -44,7 +44,10 @@ class DriveService:
 
         self.folder_content_cache = {}
         self.cache_lock = threading.Lock()
-        self.CACHE_DURATION_SECONDS = 600 # 10 minutes
+        # Cache TTL for folder content listings. Bumped from 10m to 1h so that
+        # long-running batch uploads (where we walk a remote tree once at the
+        # start and then upload thousands of files) don't re-list folders.
+        self.CACHE_DURATION_SECONDS = 3600  # 1 hour
 
         self.TWENTY_GIGABYTES = 20 * 1024 * 1024 * 1024   # 20GB limit
         self.MULTIPART_THRESHOLD = 100 * 1024 * 1024      # 100MB multipart threshold
@@ -687,9 +690,9 @@ class DriveService:
         
         return filename
 
-    def upload_file_to_folder(self, file_path_str: str, destination_folder_uuid: str, 
-                            custom_name: str = None, custom_extension: str = None,
-                            creation_time: str = None, modification_time: str = None):
+    def upload_file_to_folder(self, file_path_str: str, destination_folder_uuid: str,
+                            custom_name: Optional[str] = None, custom_extension: Optional[str] = None,
+                            creation_time: Optional[str] = None, modification_time: Optional[str] = None):
         """Upload file with custom name/extension and optional timestamps to specific folder"""
         credentials = self.auth.get_auth_details()
         user = credentials['user']
@@ -1121,7 +1124,8 @@ class DriveService:
         return new_folder_metadata
 
     def create_folder_recursive(self, path: str,
-                              creation_time: str = None, modification_time: str = None) -> Dict[str, Any]:
+                              creation_time: Optional[str] = None,
+                              modification_time: Optional[str] = None) -> Dict[str, Any]:
         """
         Ensures a folder path exists, creating intermediate folders if necessary.
         Sets timestamps *only* if the folder is being created new.
@@ -1223,7 +1227,8 @@ class DriveService:
         return {'uuid': root_folder_uuid, 'plainName': 'Root'}
 
     def create_folder_recursive(self, path: str,
-                              creation_time: str = None, modification_time: str = None) -> Dict[str, Any]:
+                              creation_time: Optional[str] = None,
+                              modification_time: Optional[str] = None) -> Dict[str, Any]:
         """
         Ensures a folder path exists, creating intermediate folders if necessary.
         Sets timestamps *only* if the folder is being created new.
