@@ -1056,9 +1056,17 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                     click.echo("")
 
                     # ===== Pass 2: actual uploads (parallel) =====
+                    # Ctrl+C sets this; queued-but-not-started workers see it
+                    # at the top of _do_upload and return immediately. In-flight
+                    # uploads can't be killed mid-stream (network call is
+                    # blocking), but no new ones will start.
+                    cancel_event = threading.Event()
+
                     def _do_upload(job: Tuple[Path, str, str, Optional[str], Optional[str]]
                                    ) -> Tuple[str, Path, str]:
                         f_item, f_parent_uuid, f_parent_path, f_ct, f_mt = job
+                        if cancel_event.is_set():
+                            return ('cancelled', f_item, f_parent_uuid)
                         try:
                             res = drive_service.upload_single_item_with_conflict_handling(
                                 f_item,
@@ -1077,7 +1085,7 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                     if upload_jobs:
                         max_workers = max(1, min(workers, len(upload_jobs)))
                         click.echo(f"  -> 🧵 Uploading {len(upload_jobs):,} file(s) with {max_workers} worker(s)")
-                        upload_progress = {'done': 0, 'ok': 0, 'err': 0,
+                        upload_progress = {'done': 0, 'ok': 0, 'err': 0, 'cancelled': 0,
                                            'total': len(upload_jobs), 'last_print': 0.0}
                         upload_progress_lock = threading.Lock()
 
@@ -1091,53 +1099,77 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                                 total = upload_progress['total']
                                 ok = upload_progress['ok']
                                 err = upload_progress['err']
+                                canc = upload_progress['cancelled']
                             pct = (100.0 * done / total) if total else 100.0
+                            canc_part = f" cancelled={canc:,}" if canc else ""
                             with log_lock:
                                 click.echo(
                                     f"\r  -> 📤 Uploaded {done:,}/{total:,} "
-                                    f"({pct:5.1f}%) ok={ok:,} err={err:,}",
+                                    f"({pct:5.1f}%) ok={ok:,} err={err:,}{canc_part}",
                                     nl=False,
                                 )
 
                         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = [executor.submit(_do_upload, job) for job in upload_jobs]
-                            for fut in concurrent.futures.as_completed(futures):
-                                try:
-                                    result, item_done, parent_uuid_done = fut.result()
-                                except Exception as fut_err:
-                                    _safe_log(f"  -> ❌ Worker exception: {fut_err}", err=True)
-                                    _bump_counter('error')
-                                    with upload_progress_lock:
-                                        upload_progress['done'] += 1
-                                        upload_progress['err'] += 1
-                                    _upload_tick()
-                                    continue
-
-                                if result == 'uploaded':
-                                    _bump_counter('success')
+                            try:
+                                for fut in concurrent.futures.as_completed(futures):
                                     try:
-                                        sz = item_done.stat().st_size
-                                    except Exception:
-                                        sz = 0
-                                    with cache_lock:
-                                        existing_files_by_parent.setdefault(parent_uuid_done, {})[item_done.name] = {
-                                            'size': sz,
-                                            'mtime': '',
-                                            'uuid': None,
-                                        }
-                                    with upload_progress_lock:
-                                        upload_progress['done'] += 1
-                                        upload_progress['ok'] += 1
-                                elif result == 'skipped':
-                                    _bump_counter('skipped')
-                                    with upload_progress_lock:
-                                        upload_progress['done'] += 1
-                                else:
-                                    _bump_counter('error')
-                                    with upload_progress_lock:
-                                        upload_progress['done'] += 1
-                                        upload_progress['err'] += 1
-                                _upload_tick()
+                                        result, item_done, parent_uuid_done = fut.result()
+                                    except concurrent.futures.CancelledError:
+                                        with upload_progress_lock:
+                                            upload_progress['done'] += 1
+                                            upload_progress['cancelled'] += 1
+                                        _upload_tick()
+                                        continue
+                                    except Exception as fut_err:
+                                        _safe_log(f"  -> ❌ Worker exception: {fut_err}", err=True)
+                                        _bump_counter('error')
+                                        with upload_progress_lock:
+                                            upload_progress['done'] += 1
+                                            upload_progress['err'] += 1
+                                        _upload_tick()
+                                        continue
+
+                                    if result == 'uploaded':
+                                        _bump_counter('success')
+                                        try:
+                                            sz = item_done.stat().st_size
+                                        except Exception:
+                                            sz = 0
+                                        with cache_lock:
+                                            existing_files_by_parent.setdefault(parent_uuid_done, {})[item_done.name] = {
+                                                'size': sz,
+                                                'mtime': '',
+                                                'uuid': None,
+                                            }
+                                        with upload_progress_lock:
+                                            upload_progress['done'] += 1
+                                            upload_progress['ok'] += 1
+                                    elif result == 'skipped':
+                                        _bump_counter('skipped')
+                                        with upload_progress_lock:
+                                            upload_progress['done'] += 1
+                                    elif result == 'cancelled':
+                                        with upload_progress_lock:
+                                            upload_progress['done'] += 1
+                                            upload_progress['cancelled'] += 1
+                                    else:
+                                        _bump_counter('error')
+                                        with upload_progress_lock:
+                                            upload_progress['done'] += 1
+                                            upload_progress['err'] += 1
+                                    _upload_tick()
+                            except KeyboardInterrupt:
+                                cancel_event.set()
+                                _upload_tick(force=True)
+                                click.echo("")
+                                _safe_log("⚠️  Ctrl+C received — cancelling queued uploads "
+                                          "(in-flight transfers will finish)...", err=True)
+                                # Drop futures that haven't started yet.
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                # Re-raise so the outer handler reports the abort
+                                # and exits with the right summary printed.
+                                raise
                         _upload_tick(force=True)
                         click.echo("")
 
@@ -1146,24 +1178,36 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                     skipped_count += 1
 
             except Exception as e:
+                # KeyboardInterrupt is BaseException, not Exception, so it
+                # naturally bubbles past this handler to the outer try.
                 click.echo(f"❌ Error processing {local_path}: {e}", err=True)
                 error_count += 1
                 continue
 
-        # --- Summary ---
-        click.echo("=" * 40)
-        click.echo("📊 Upload Summary:")
-        click.echo(f"  ✅ Uploaded: {success_count}")
-        click.echo(f"  ⏭️  Skipped:  {skipped_count}")
-        if filtered_count > 0:
-            click.echo(f"  🚫 Filtered: {filtered_count}")
-        click.echo(f"  ❌ Errors:   {error_count}")
-        click.echo("=" * 40)
+        aborted = False
 
+    except KeyboardInterrupt:
+        aborted = True
     except Exception as e:
         click.echo(f"❌ Upload failed: {e}", err=True)
         import traceback
         traceback.print_exc()
+        sys.exit(1)
+
+    # --- Summary (always printed, even on Ctrl+C) ---
+    click.echo("=" * 40)
+    if aborted:
+        click.echo("⚠️  Upload ABORTED by user (Ctrl+C)")
+    click.echo("📊 Upload Summary:")
+    click.echo(f"  ✅ Uploaded: {success_count}")
+    click.echo(f"  ⏭️  Skipped:  {skipped_count}")
+    if filtered_count > 0:
+        click.echo(f"  🚫 Filtered: {filtered_count}")
+    click.echo(f"  ❌ Errors:   {error_count}")
+    click.echo("=" * 40)
+    if aborted:
+        sys.exit(130)  # standard exit code for SIGINT
+    if error_count:
         sys.exit(1)
 
 @cli.command()
