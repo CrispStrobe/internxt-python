@@ -851,8 +851,28 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                             existing_files_by_parent[parent_uuid] = meta_map
                         return meta_map
 
+                    # Progress tracking for the recursive remote pre-scan.
+                    # Prints in-place updates throttled to ~5/sec so big trees
+                    # don't flood the terminal.
+                    scan_progress = {'folders': 0, 'files': 0, 'last_print': 0.0}
+
+                    def _scan_tick(force: bool = False) -> None:
+                        now = time.time()
+                        if not force and (now - scan_progress['last_print']) < 0.2:
+                            return
+                        scan_progress['last_print'] = now
+                        click.echo(
+                            f"\r  -> 📋 Scanning remote: "
+                            f"{scan_progress['folders']:,} folders, "
+                            f"{scan_progress['files']:,} files",
+                            nl=False,
+                        )
+
                     def _seed_recursive(folder_uuid: str) -> None:
-                        _seed_folder_cache(folder_uuid)
+                        meta = _seed_folder_cache(folder_uuid)
+                        scan_progress['folders'] += 1
+                        scan_progress['files'] += len(meta)
+                        _scan_tick()
                         try:
                             content = drive_service.get_folder_content(folder_uuid)
                             for sub in content.get('folders', []):
@@ -914,10 +934,11 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                     if existing_root_info is not None:
                         click.echo(f"  -> ✨ Target subtree exists; pre-scanning recursively to skip Pass 1...")
                         _seed_recursive(existing_root_info['uuid'])
+                        _scan_tick(force=True)
+                        click.echo("")  # finish the in-place line
                         pass1_skipped = True
-                        if verbose:
-                            total_files = sum(len(v) for v in existing_files_by_parent.values())
-                            click.echo(f"  -> 📋 Pre-scanned {len(existing_files_by_parent)} folders, {total_files} files")
+                        total_files = sum(len(v) for v in existing_files_by_parent.values())
+                        click.echo(f"  -> 📋 Pre-scanned {len(existing_files_by_parent):,} folders, {total_files:,} files")
                     elif not copy_contents_only:
                         # Need to create root folder with timestamps
                         ct_root, mt_root = _read_timestamps(local_path)
@@ -975,12 +996,28 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
 
                     # ===== Build the upload work list (sequential parent resolution) =====
                     upload_jobs: List[Tuple[Path, str, str, Optional[str], Optional[str]]] = []
+                    plan_progress = {'seen': 0, 'queued': 0, 'skipped_local': 0, 'last_print': 0.0}
+
+                    def _plan_tick(force: bool = False) -> None:
+                        now = time.time()
+                        if not force and (now - plan_progress['last_print']) < 0.2:
+                            return
+                        plan_progress['last_print'] = now
+                        click.echo(
+                            f"\r  -> 🔎 Planning: scanned {plan_progress['seen']:,}, "
+                            f"queued {plan_progress['queued']:,}, "
+                            f"skipped {plan_progress['skipped_local']:,}",
+                            nl=False,
+                        )
+
                     for item in local_path.rglob('*'):
                         if not item.is_file():
                             continue
+                        plan_progress['seen'] += 1
+                        _plan_tick()
                         if not drive_service.should_include_file(item, include_patterns, exclude_patterns):
                             if verbose:
-                                click.echo(f"  -> 🚫 Filtered: {item.name}")
+                                _safe_log(f"  -> 🚫 Filtered: {item.name}")
                             filtered_count += 1
                             continue
 
@@ -1007,11 +1044,16 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                         # Fast skip BEFORE submitting (avoids occupying a worker)
                         if _should_skip(parent_folder_uuid, item.name, local_size, mt):
                             if verbose:
-                                click.echo(f"  -> ⏭️  Skipping (already exists): {relative_path}")
+                                _safe_log(f"  -> ⏭️  Skipping (already exists): {relative_path}")
                             skipped_count += 1
+                            plan_progress['skipped_local'] += 1
                             continue
 
                         upload_jobs.append((item, parent_folder_uuid, item_target_parent_path_str, ct, mt))
+                        plan_progress['queued'] += 1
+
+                    _plan_tick(force=True)
+                    click.echo("")
 
                     # ===== Pass 2: actual uploads (parallel) =====
                     def _do_upload(job: Tuple[Path, str, str, Optional[str], Optional[str]]
@@ -1034,8 +1076,29 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
 
                     if upload_jobs:
                         max_workers = max(1, min(workers, len(upload_jobs)))
-                        if verbose:
-                            click.echo(f"  -> 🧵 Uploading {len(upload_jobs)} files with {max_workers} worker(s)")
+                        click.echo(f"  -> 🧵 Uploading {len(upload_jobs):,} file(s) with {max_workers} worker(s)")
+                        upload_progress = {'done': 0, 'ok': 0, 'err': 0,
+                                           'total': len(upload_jobs), 'last_print': 0.0}
+                        upload_progress_lock = threading.Lock()
+
+                        def _upload_tick(force: bool = False) -> None:
+                            now = time.time()
+                            with upload_progress_lock:
+                                if not force and (now - upload_progress['last_print']) < 0.2:
+                                    return
+                                upload_progress['last_print'] = now
+                                done = upload_progress['done']
+                                total = upload_progress['total']
+                                ok = upload_progress['ok']
+                                err = upload_progress['err']
+                            pct = (100.0 * done / total) if total else 100.0
+                            with log_lock:
+                                click.echo(
+                                    f"\r  -> 📤 Uploaded {done:,}/{total:,} "
+                                    f"({pct:5.1f}%) ok={ok:,} err={err:,}",
+                                    nl=False,
+                                )
+
                         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = [executor.submit(_do_upload, job) for job in upload_jobs]
                             for fut in concurrent.futures.as_completed(futures):
@@ -1044,12 +1107,14 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                                 except Exception as fut_err:
                                     _safe_log(f"  -> ❌ Worker exception: {fut_err}", err=True)
                                     _bump_counter('error')
+                                    with upload_progress_lock:
+                                        upload_progress['done'] += 1
+                                        upload_progress['err'] += 1
+                                    _upload_tick()
                                     continue
 
                                 if result == 'uploaded':
                                     _bump_counter('success')
-                                    # Refresh cache so a subsequent same-name re-upload
-                                    # in this batch (or after overwrite) is consistent.
                                     try:
                                         sz = item_done.stat().st_size
                                     except Exception:
@@ -1060,10 +1125,21 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                                             'mtime': '',
                                             'uuid': None,
                                         }
+                                    with upload_progress_lock:
+                                        upload_progress['done'] += 1
+                                        upload_progress['ok'] += 1
                                 elif result == 'skipped':
                                     _bump_counter('skipped')
+                                    with upload_progress_lock:
+                                        upload_progress['done'] += 1
                                 else:
                                     _bump_counter('error')
+                                    with upload_progress_lock:
+                                        upload_progress['done'] += 1
+                                        upload_progress['err'] += 1
+                                _upload_tick()
+                        _upload_tick(force=True)
+                        click.echo("")
 
                 else:
                     click.echo(f"⚠️ Skipping unknown item type: {local_path}", err=True)
