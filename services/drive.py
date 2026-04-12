@@ -53,6 +53,94 @@ class DriveService:
         self.MULTIPART_THRESHOLD = 100 * 1024 * 1024      # 100MB multipart threshold
         self.CHUNK_SIZE = 64 * 1024 * 1024                # 64MB chunks
 
+        # Memory-gated concurrency: only allow as many simultaneous
+        # read+encrypt operations as fit in available RAM.  The semaphore
+        # value is computed lazily per-file based on current free memory.
+        self._mem_lock = threading.Lock()      # protects _mem_reserved
+        self._mem_reserved = 0                 # bytes currently claimed
+        self._mem_cond = threading.Condition(self._mem_lock)
+
+    @staticmethod
+    def _available_memory() -> int:
+        """Return available RAM in bytes (best-effort, cross-platform)."""
+        try:
+            import psutil
+            return psutil.virtual_memory().available
+        except ImportError:
+            pass
+        # Platform-specific fallbacks (no psutil)
+        try:
+            if sys.platform == 'darwin':
+                import subprocess
+                ps = int(subprocess.check_output(['sysctl', '-n', 'hw.pagesize']).strip())
+                vm = subprocess.check_output(['vm_stat']).decode()
+                free = spec = 0
+                for line in vm.splitlines():
+                    if 'Pages free' in line:
+                        free = int(line.split(':')[1].strip().rstrip('.'))
+                    elif 'Pages speculative' in line:
+                        spec = int(line.split(':')[1].strip().rstrip('.'))
+                return (free + spec) * ps
+            elif sys.platform == 'win32':
+                import ctypes
+                class MEMORYSTATUSEX(ctypes.Structure):
+                    _fields_ = [
+                        ('dwLength', ctypes.c_ulong),
+                        ('dwMemoryLoad', ctypes.c_ulong),
+                        ('ullTotalPhys', ctypes.c_ulonglong),
+                        ('ullAvailPhys', ctypes.c_ulonglong),
+                        ('ullTotalPageFile', ctypes.c_ulonglong),
+                        ('ullAvailPageFile', ctypes.c_ulonglong),
+                        ('ullTotalVirtual', ctypes.c_ulonglong),
+                        ('ullAvailVirtual', ctypes.c_ulonglong),
+                        ('ullAvailExtendedVirtual', ctypes.c_ulonglong),
+                    ]
+                stat = MEMORYSTATUSEX(dwLength=ctypes.sizeof(MEMORYSTATUSEX))
+                ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+                return stat.ullAvailPhys
+            else:
+                # Linux / other Unix: read from /proc/meminfo
+                with open('/proc/meminfo') as f:
+                    for line in f:
+                        if line.startswith('MemAvailable:'):
+                            return int(line.split()[1]) * 1024  # kB -> bytes
+        except Exception:
+            pass
+        # Last resort: assume 4 GB available
+        return 4 * 1024 * 1024 * 1024
+
+    def _mem_acquire(self, need: int) -> None:
+        """Block until *need* bytes can be reserved without exceeding available RAM.
+
+        We keep a safety margin of 1 GB so the rest of the process (and OS)
+        still has breathing room.  If no other reservation is active AND
+        available memory is too low, we still let one worker through so that
+        progress is never deadlocked (the OS may reclaim caches/buffers).
+        """
+        SAFETY_MARGIN = 1 * 1024 * 1024 * 1024  # 1 GB
+
+        with self._mem_cond:
+            while True:
+                avail = self._available_memory()
+                headroom = max(0, avail - SAFETY_MARGIN)
+                if need <= headroom - self._mem_reserved:
+                    # Enough real memory for this reservation
+                    self._mem_reserved += need
+                    return
+                if self._mem_reserved == 0:
+                    # Nothing else reserved — let one through to avoid deadlock,
+                    # even if the OS reports tight memory (caches may be reclaimable).
+                    self._mem_reserved += need
+                    return
+                # Wait for another worker to release memory
+                self._mem_cond.wait(timeout=5)  # re-check every 5s
+
+    def _mem_release(self, amount: int) -> None:
+        """Return a previous reservation."""
+        with self._mem_cond:
+            self._mem_reserved = max(0, self._mem_reserved - amount)
+            self._mem_cond.notify_all()
+
     def _get_network_auth(self, user_creds: Dict[str, Any]) -> tuple:
         """Creates Basic Auth for Network API"""
         bridge_user = user_creds.get('bridgeUser')
@@ -733,146 +821,171 @@ class DriveService:
             if modification_time:
                 print(f"        Modification: {modification_time}")
         
-        print(f"     📖 Reading file from disk...")
-        start_read = time.time()
+        # Memory-gated: reserve ~2x file_size (plaintext + encrypted copy)
+        # so we don't OOM when multiple workers handle large files at once.
+        # After encryption we del plaintext and release half; the other half
+        # stays reserved until the upload finishes and encrypted_data is freed.
+        mem_need = file_size * 2
+        mem_held = 0  # tracks how much we currently hold
+        avail = self._available_memory()
+        print(f"     💾 Memory: {self._format_size(avail)} available, need ~{self._format_size(mem_need)} for read+encrypt")
+        self._mem_acquire(mem_need)
+        mem_held = mem_need
+
         try:
-            with open(file_path, 'rb') as f:
-                plaintext = f.read()
-        except Exception as e:
-            raise IOError(f"Failed to read file {file_path}: {e}")
-        
-        read_time = time.time() - start_read
-        print(f"     ✅ File read complete ({read_time:.1f}s, {self._format_size(len(plaintext))})")
-        
-        # Retry logic for the entire upload
-        max_retries = 3
-        for attempt in range(max_retries):
+            print(f"     📖 Reading file from disk...")
+            start_read = time.time()
             try:
-                # Step 1: Encryption (VERBOSE)
-                print(f"\n     🔐 Step 1/5: Encrypting {self._format_size(len(plaintext))}...")
-                print(f"        This may take a few minutes for large files...")
-                start_encrypt = time.time()
-                
-                encrypted_data, file_index_hex = self.crypto.encrypt_stream_internxt_protocol(
-                    plaintext, mnemonic, bucket_id
-                )
-                
-                encrypt_time = time.time() - start_encrypt
-                print(f"     ✅ Encryption complete!")
-                print(f"        Time: {encrypt_time:.1f}s ({self._format_size(len(plaintext)/encrypt_time)}/s)")
-                print(f"        Encrypted size: {self._format_size(len(encrypted_data))}")
-                print(f"        File index: {file_index_hex[:16]}...")
-
-                # Step 2: Request upload URL (VERBOSE)
-                print(f"\n     🚀 Step 2/5: Requesting upload URL from server...")
-                start_init = time.time()
-                
-                start_response = self.api.start_upload(bucket_id, len(encrypted_data), auth=network_auth)
-                upload_details = start_response['uploads'][0]
-                upload_url = upload_details['url']
-                file_network_uuid = upload_details['uuid']
-                
-                init_time = time.time() - start_init
-                print(f"     ✅ Upload URL received ({init_time:.1f}s)")
-                print(f"        Network UUID: {file_network_uuid}")
-                print(f"        Upload URL: {upload_url[:50]}...")
-
-                # Step 3: Upload encrypted data (VERBOSE)
-                print(f"\n     ☁️  Step 3/5: Uploading {self._format_size(len(encrypted_data))} to network...")
-                print(f"        Timeout: {timeout_seconds}s")
-                print(f"        This is the longest step - please be patient...")
-                
-                start_upload = time.time()
-                self._upload_chunk_with_progress(upload_url, encrypted_data, timeout_seconds)
-                upload_time = time.time() - start_upload
-                
-                upload_speed = len(encrypted_data) / upload_time if upload_time > 0 else 0
-                print(f"     ✅ Upload complete!")
-                print(f"        Time: {upload_time:.1f}s ({self._format_size(upload_speed)}/s)")
-
-                # Step 4: Finalize upload (VERBOSE)
-                print(f"\n     ✅ Step 4/5: Finalizing upload on server...")
-                start_finalize = time.time()
-                
-                encrypted_hash = hashlib.sha256(encrypted_data).hexdigest()
-                print(f"        Computed hash: {encrypted_hash[:16]}...")
-                
-                finish_payload = {
-                    'index': file_index_hex,
-                    'shards': [{'hash': encrypted_hash, 'uuid': file_network_uuid}]
-                }
-                finish_response = self.api.finish_upload(bucket_id, finish_payload, auth=network_auth)
-                network_file_id = finish_response['id']
-                
-                finalize_time = time.time() - start_finalize
-                print(f"     ✅ Server finalization complete ({finalize_time:.1f}s)")
-                print(f"        Network file ID: {network_file_id}")
-
-                # Step 5: Create file entry (VERBOSE)
-                print(f"\n     📋 Step 5/5: Creating file entry in your Drive...")
-                start_entry = time.time()
-                
-                file_entry_payload = {
-                    'folderUuid': destination_folder_uuid,
-                    'plainName': file_name,
-                    'type': file_extension if file_extension else '',
-                    'size': file_size,
-                    'bucket': bucket_id,
-                    'fileId': network_file_id,
-                    'encryptVersion': 'Aes03',
-                    'name': ''
-                }
-                
-                # Add timestamps using SDK-compatible field names
-                if creation_time:
-                    file_entry_payload['creationTime'] = creation_time
-                if modification_time:
-                    file_entry_payload['modificationTime'] = modification_time
-                
-                created_file = self.api.create_file_entry(file_entry_payload)
-                
-                entry_time = time.time() - start_entry
-                print(f"     ✅ File entry created ({entry_time:.1f}s)")
-                print(f"        File UUID: {created_file.get('uuid', 'N/A')}")
-
-                with self.cache_lock:
-                    cached_item = self.folder_content_cache.get(destination_folder_uuid)
-                    if cached_item:
-                        cache_time, content = cached_item
-                        content['files'].append(created_file)
-                        self.folder_content_cache[destination_folder_uuid] = (cache_time, content)
-                
-                # Verify if timestamps were actually set
-                if creation_time or modification_time:
-                    returned_creation = created_file.get('creationTime') or created_file.get('createdAt')
-                    returned_modification = created_file.get('modificationTime') or created_file.get('updatedAt')
-                    
-                    if creation_time and returned_creation:
-                        print(f"     ✅ Creation timestamp preserved: {returned_creation}")
-                    elif creation_time:
-                        print(f"     ⚠️  Creation timestamp NOT set (API returned: {returned_creation})")
-                    
-                    if modification_time and returned_modification:
-                        print(f"     ✅ Modification timestamp preserved: {returned_modification}")
-                    elif modification_time:
-                        print(f"     ⚠️  Modification timestamp NOT set (API returned: {returned_modification})")
-                
-                # Summary
-                total_time = time.time() - start_read
-                print(f"\n     🎉 Upload complete!")
-                print(f"        Total time: {total_time:.1f}s ({total_time/60:.1f} minutes)")
-                print(f"        Average speed: {self._format_size(file_size/total_time)}/s")
-                
-                return created_file  # Success!
-                
+                with open(file_path, 'rb') as f:
+                    plaintext = f.read()
             except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-                    print(f"\n     ⚠️  Upload failed (attempt {attempt+1}/{max_retries}): {e}")
-                    print(f"     ⏳ Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                else:
-                    raise Exception(f"Upload failed after {max_retries} attempts: {e}")
+                raise IOError(f"Failed to read file {file_path}: {e}")
+
+            read_time = time.time() - start_read
+            print(f"     ✅ File read complete ({read_time:.1f}s, {self._format_size(len(plaintext))})")
+
+            # Step 1: Encryption
+            print(f"\n     🔐 Step 1/5: Encrypting {self._format_size(len(plaintext))}...")
+            print(f"        This may take a few minutes for large files...")
+            start_encrypt = time.time()
+
+            encrypted_data, file_index_hex = self.crypto.encrypt_stream_internxt_protocol(
+                plaintext, mnemonic, bucket_id
+            )
+
+            encrypt_time = time.time() - start_encrypt
+            plaintext_len = len(plaintext)
+            del plaintext  # free ~file_size of RAM immediately
+            # Release half — plaintext is gone, encrypted_data (~file_size) stays
+            self._mem_release(file_size)
+            mem_held = file_size
+
+            print(f"     ✅ Encryption complete!")
+            print(f"        Time: {encrypt_time:.1f}s ({self._format_size(plaintext_len/encrypt_time)}/s)")
+            print(f"        Encrypted size: {self._format_size(len(encrypted_data))}")
+            print(f"        File index: {file_index_hex[:16]}...")
+        except BaseException:
+            self._mem_release(mem_held)
+            mem_held = 0
+            raise
+
+        # encrypted_data is in memory (~file_size); file_size is still reserved.
+        # Release the remaining reservation when we're done (success or final failure).
+        try:
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # Step 2: Request upload URL
+                    print(f"\n     🚀 Step 2/5: Requesting upload URL from server...")
+                    start_init = time.time()
+
+                    start_response = self.api.start_upload(bucket_id, len(encrypted_data), auth=network_auth)
+                    upload_details = start_response['uploads'][0]
+                    upload_url = upload_details['url']
+                    file_network_uuid = upload_details['uuid']
+
+                    init_time = time.time() - start_init
+                    print(f"     ✅ Upload URL received ({init_time:.1f}s)")
+                    print(f"        Network UUID: {file_network_uuid}")
+                    print(f"        Upload URL: {upload_url[:50]}...")
+
+                    # Step 3: Upload encrypted data
+                    print(f"\n     ☁️  Step 3/5: Uploading {self._format_size(len(encrypted_data))} to network...")
+                    print(f"        Timeout: {timeout_seconds}s")
+                    print(f"        This is the longest step - please be patient...")
+
+                    start_upload = time.time()
+                    self._upload_chunk_with_progress(upload_url, encrypted_data, timeout_seconds)
+                    upload_time = time.time() - start_upload
+
+                    upload_speed = len(encrypted_data) / upload_time if upload_time > 0 else 0
+                    print(f"     ✅ Upload complete!")
+                    print(f"        Time: {upload_time:.1f}s ({self._format_size(upload_speed)}/s)")
+
+                    # Step 4: Finalize upload
+                    print(f"\n     ✅ Step 4/5: Finalizing upload on server...")
+                    start_finalize = time.time()
+
+                    encrypted_hash = hashlib.sha256(encrypted_data).hexdigest()
+                    print(f"        Computed hash: {encrypted_hash[:16]}...")
+
+                    finish_payload = {
+                        'index': file_index_hex,
+                        'shards': [{'hash': encrypted_hash, 'uuid': file_network_uuid}]
+                    }
+                    finish_response = self.api.finish_upload(bucket_id, finish_payload, auth=network_auth)
+                    network_file_id = finish_response['id']
+
+                    finalize_time = time.time() - start_finalize
+                    print(f"     ✅ Server finalization complete ({finalize_time:.1f}s)")
+                    print(f"        Network file ID: {network_file_id}")
+
+                    # Step 5: Create file entry
+                    print(f"\n     📋 Step 5/5: Creating file entry in your Drive...")
+                    start_entry = time.time()
+
+                    file_entry_payload = {
+                        'folderUuid': destination_folder_uuid,
+                        'plainName': file_name,
+                        'type': file_extension if file_extension else '',
+                        'size': file_size,
+                        'bucket': bucket_id,
+                        'fileId': network_file_id,
+                        'encryptVersion': 'Aes03',
+                        'name': ''
+                    }
+
+                    if creation_time:
+                        file_entry_payload['creationTime'] = creation_time
+                    if modification_time:
+                        file_entry_payload['modificationTime'] = modification_time
+
+                    created_file = self.api.create_file_entry(file_entry_payload)
+
+                    entry_time = time.time() - start_entry
+                    print(f"     ✅ File entry created ({entry_time:.1f}s)")
+                    print(f"        File UUID: {created_file.get('uuid', 'N/A')}")
+
+                    with self.cache_lock:
+                        cached_item = self.folder_content_cache.get(destination_folder_uuid)
+                        if cached_item:
+                            cache_time, content = cached_item
+                            content['files'].append(created_file)
+                            self.folder_content_cache[destination_folder_uuid] = (cache_time, content)
+
+                    if creation_time or modification_time:
+                        returned_creation = created_file.get('creationTime') or created_file.get('createdAt')
+                        returned_modification = created_file.get('modificationTime') or created_file.get('updatedAt')
+
+                        if creation_time and returned_creation:
+                            print(f"     ✅ Creation timestamp preserved: {returned_creation}")
+                        elif creation_time:
+                            print(f"     ⚠️  Creation timestamp NOT set (API returned: {returned_creation})")
+
+                        if modification_time and returned_modification:
+                            print(f"     ✅ Modification timestamp preserved: {returned_modification}")
+                        elif modification_time:
+                            print(f"     ⚠️  Modification timestamp NOT set (API returned: {returned_modification})")
+
+                    total_time = time.time() - start_read
+                    print(f"\n     🎉 Upload complete!")
+                    print(f"        Total time: {total_time:.1f}s ({total_time/60:.1f} minutes)")
+                    print(f"        Average speed: {self._format_size(file_size/total_time)}/s")
+
+                    return created_file
+
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt
+                        print(f"\n     ⚠️  Upload failed (attempt {attempt+1}/{max_retries}): {e}")
+                        print(f"     ⏳ Retrying in {wait_time} seconds...")
+                        time.sleep(wait_time)
+                    else:
+                        raise Exception(f"Upload failed after {max_retries} attempts: {e}")
+        finally:
+            # Release the remaining reservation for encrypted_data
+            if mem_held > 0:
+                self._mem_release(mem_held)
 
     def _upload_chunk_with_progress(self, upload_url: str, chunk_data: bytes, timeout_seconds: int):
         """Upload chunk with custom timeout and progress tracking"""
