@@ -769,3 +769,371 @@ def test_live_find_files_within_sentinel(authed_session, sentinel_folder, tmp_pa
         f"Expected {sorted(expected_names)}, got: {names}"
     )
     print(f"✅ LIVE: find('*.{probe_ext}') returned exactly the matching files")
+
+
+# =============================================================================
+# BATCHED / NESTED OPERATIONS
+# =============================================================================
+
+def test_live_recursive_folder_upload_download(authed_session, sentinel_folder, tmp_path):
+    """Build a 3-folder local tree with 4 files, upload it (per-file
+    via upload_file_to_folder, the same path the CLI takes for `-r`),
+    then download recursively into a different local dir and verify
+    the structure + bytes match for every file."""
+    drive = authed_session['drive']
+    root_remote_path = _unique_subpath("rec-tree")
+
+    # Build local source tree:
+    #   <tmp>/src/
+    #     a.txt
+    #     b.bin
+    #     sub1/
+    #       c.txt
+    #     sub2/
+    #       sub2sub/
+    #         d.txt
+    src_root = tmp_path / "src"
+    src_root.mkdir()
+    (src_root / "sub1").mkdir()
+    (src_root / "sub2").mkdir()
+    (src_root / "sub2" / "sub2sub").mkdir()
+
+    files = {
+        'a.txt':                       _write_payload(tmp_path / "src", "a.txt", 64)[1],
+        'b.bin':                       _write_payload(tmp_path / "src", "b.bin", 256)[1],
+        'sub1/c.txt':                  _write_payload(src_root / "sub1", "c.txt", 96)[1],
+        'sub2/sub2sub/d.txt':          _write_payload(src_root / "sub2" / "sub2sub", "d.txt", 128)[1],
+    }
+    print(f"\n🌳 LIVE: Built local tree with {len(files)} files at {src_root}")
+
+    # Upload by walking the tree: for each file, ensure the remote folder
+    # path exists then upload into it. Mirrors what the CLI's recursive
+    # upload does internally.
+    remote_uuids = {}  # rel_path -> remote file uuid
+    for rel_path, payload in files.items():
+        local_file = src_root / rel_path
+        rel_dir = '/'.join(rel_path.split('/')[:-1])
+        target_remote_dir = root_remote_path
+        if rel_dir:
+            target_remote_dir = f"{root_remote_path}/{rel_dir}"
+        folder_info = drive.create_folder_recursive(target_remote_dir)
+        # Use a unique custom_name per file so reruns don't collide
+        leaf = local_file.name
+        stem, _, ext = leaf.rpartition('.')
+        unique = _unique_name(stem or leaf)
+        uploaded = drive.upload_file_to_folder(
+            str(local_file), folder_info['uuid'],
+            custom_name=unique, custom_extension=ext if stem else '',
+        )
+        remote_uuids[rel_path] = (uploaded['uuid'], unique, ext)
+    print(f"📤 LIVE: Uploaded all {len(files)} files into {root_remote_path}")
+
+    # Download recursively: for each known remote uuid, download into the
+    # corresponding local subpath, then compare bytes.
+    download_root = tmp_path / "downloads"
+    download_root.mkdir()
+    for rel_path, (uuid_, unique_name, ext) in remote_uuids.items():
+        local_dir = download_root / Path(rel_path).parent
+        local_dir.mkdir(parents=True, exist_ok=True)
+        out_path = drive.download_file(uuid_, str(local_dir))
+        downloaded = Path(out_path).read_bytes()
+        original = files[rel_path]
+        assert downloaded == original, (
+            f"Bytes mismatch for {rel_path}: "
+            f"downloaded {len(downloaded)} != original {len(original)}"
+        )
+    print(f"✅ LIVE: All {len(files)} files round-tripped through recursive upload/download")
+
+
+def test_live_move_nonempty_folder_brings_children(authed_session, sentinel_folder, tmp_path):
+    """Move a folder that contains files + a nested subfolder.
+    Verify children come along with the same UUIDs (no re-upload)."""
+    drive = authed_session['drive']
+
+    # Build remote tree:
+    #   <sentinel>/src-parent/<rand>/A/
+    #     file1.txt
+    #     file2.txt
+    #     sub/
+    #       file3.txt
+    src_root_path = _unique_subpath("move-src")
+    a_path = f"{src_root_path}/A"
+    a_sub_path = f"{a_path}/sub"
+    a_info = drive.create_folder_recursive(a_path)
+    a_sub_info = drive.create_folder_recursive(a_sub_path)
+
+    # Upload three files
+    file_uuids: dict[str, str] = {}
+    for placement_uuid, rel_name in [
+        (a_info['uuid'], 'file1'),
+        (a_info['uuid'], 'file2'),
+        (a_sub_info['uuid'], 'file3'),
+    ]:
+        unique = _unique_name(rel_name)
+        local, _ = _write_payload(tmp_path, f"{unique}.txt", size_bytes=64)
+        uploaded = drive.upload_file_to_folder(
+            str(local), placement_uuid,
+            custom_name=unique, custom_extension='txt',
+        )
+        file_uuids[rel_name] = uploaded['uuid']
+
+    # Now move /move-src/A → /move-dst/A by moving A into a fresh dst-parent
+    dst_parent_path = _unique_subpath("move-dst")
+    dst_parent_info = drive.create_folder_recursive(dst_parent_path)
+
+    drive.move_folder(a_info['uuid'], dst_parent_info['uuid'])
+    print(f"\n📦 LIVE: Moved /A from {src_root_path} to {dst_parent_path}")
+
+    # Verify: A no longer in src-parent, IS in dst-parent
+    drive.folder_content_cache.clear()
+    src_root_info = drive.resolve_path(src_root_path)
+    src_root_listing = drive.get_folder_content(src_root_info['uuid'])
+    src_subfolders = [f.get('plainName') for f in src_root_listing['folders']]
+    assert 'A' not in src_subfolders, (
+        f"Folder A still in source after move: {src_subfolders}"
+    )
+
+    dst_listing = drive.get_folder_content(dst_parent_info['uuid'])
+    dst_subfolders = [f.get('plainName') for f in dst_listing['folders']]
+    assert 'A' in dst_subfolders, (
+        f"Folder A not in destination after move: {dst_subfolders}"
+    )
+
+    # Critical: all 3 child files must still resolve and have the SAME uuids
+    # (move = pointer reparent, not delete+upload)
+    for rel_name, original_uuid in file_uuids.items():
+        if rel_name == 'file3':
+            new_path = f"{dst_parent_path}/A/sub/{_find_full_name(drive, dst_parent_info['uuid'], 'A', 'sub', rel_name)}"
+        else:
+            new_path = f"{dst_parent_path}/A/{_find_full_name_in_a(drive, dst_parent_info['uuid'], rel_name)}"
+        # Resolve the file under its new path; uuid must match
+        resolved = drive.resolve_path(new_path)
+        assert resolved['uuid'] == original_uuid, (
+            f"Child file {rel_name} got a new uuid after parent move: "
+            f"was {original_uuid}, now {resolved['uuid']}"
+        )
+    print("✅ LIVE: Move brought all 3 children with their original uuids")
+
+
+def _find_full_name_in_a(drive, dst_parent_uuid, prefix):
+    """Helper: locate the new full filename of `prefix*.txt` under
+    dst_parent/A/. Used after a folder move to discover the renamed
+    leaf names that include _unique_name() suffixes."""
+    drive.folder_content_cache.clear()
+    dst_listing = drive.get_folder_content(dst_parent_uuid)
+    a_uuid = next(
+        (f['uuid'] for f in dst_listing['folders'] if f.get('plainName') == 'A'),
+        None,
+    )
+    assert a_uuid, "Folder A not found in destination"
+    a_listing = drive.get_folder_content(a_uuid)
+    for f in a_listing['files']:
+        plain = f.get('plainName', '')
+        if plain.startswith(prefix):
+            ext = f.get('type', '')
+            return f"{plain}.{ext}" if ext else plain
+    raise AssertionError(f"No file matching {prefix}* found under A/")
+
+
+def _find_full_name(drive, dst_parent_uuid, a_name, sub_name, prefix):
+    """Like _find_full_name_in_a but for one level deeper (A/sub/)."""
+    drive.folder_content_cache.clear()
+    dst_listing = drive.get_folder_content(dst_parent_uuid)
+    a_uuid = next(
+        (f['uuid'] for f in dst_listing['folders'] if f.get('plainName') == a_name),
+        None,
+    )
+    assert a_uuid, f"Folder {a_name} not found in destination"
+    a_listing = drive.get_folder_content(a_uuid)
+    sub_uuid = next(
+        (f['uuid'] for f in a_listing['folders'] if f.get('plainName') == sub_name),
+        None,
+    )
+    assert sub_uuid, f"Folder {sub_name} not found under {a_name}"
+    sub_listing = drive.get_folder_content(sub_uuid)
+    for f in sub_listing['files']:
+        plain = f.get('plainName', '')
+        if plain.startswith(prefix):
+            ext = f.get('type', '')
+            return f"{plain}.{ext}" if ext else plain
+    raise AssertionError(f"No file matching {prefix}* found under {a_name}/{sub_name}/")
+
+
+def test_live_rename_folder_preserves_child_paths(authed_session, sentinel_folder, tmp_path):
+    """Rename a folder that contains a file. The file's UUID must be
+    unchanged AND it must be resolvable under the new folder path."""
+    drive = authed_session['drive']
+
+    foo_path = _unique_subpath("foo")
+    foo_info = drive.create_folder_recursive(foo_path)
+
+    # Upload a single file under /foo/
+    file_name = _unique_name("inside")
+    local_file, _ = _write_payload(tmp_path, f"{file_name}.txt", size_bytes=64)
+    uploaded = drive.upload_file_to_folder(
+        str(local_file), foo_info['uuid'],
+        custom_name=file_name, custom_extension='txt',
+    )
+    file_uuid = uploaded['uuid']
+
+    # Rename /foo/ to /bar/
+    new_folder_name = _unique_name("bar")
+    drive.rename_folder(foo_info['uuid'], new_folder_name)
+    print(f"\n🏷️  LIVE: Renamed folder to {new_folder_name}")
+
+    # Reconstruct the new path and resolve the file there
+    parent_of_foo = foo_path.rsplit('/', 1)[0]
+    new_file_path = f"{parent_of_foo}/{new_folder_name}/{file_name}.txt"
+
+    drive.folder_content_cache.clear()
+    resolved = drive.resolve_path(new_file_path)
+    assert resolved['type'] == 'file'
+    assert resolved['uuid'] == file_uuid, (
+        f"Child file uuid changed after parent rename: "
+        f"{file_uuid} -> {resolved['uuid']}"
+    )
+    print("✅ LIVE: Child file resolves under renamed folder, uuid preserved")
+
+
+def test_live_trash_nonempty_folder_removes_children(authed_session, sentinel_folder, tmp_path):
+    """Trash a folder containing files. Verify the folder is gone from
+    the parent listing AND its child files no longer resolve."""
+    drive = authed_session['drive']
+
+    target_path = _unique_subpath("trashable-folder")
+    target_info = drive.create_folder_recursive(target_path)
+
+    # Add 2 files inside
+    file_uuids = []
+    file_paths = []
+    for stem in ("inner1", "inner2"):
+        unique = _unique_name(stem)
+        local, _ = _write_payload(tmp_path, f"{unique}.txt", size_bytes=64)
+        uploaded = drive.upload_file_to_folder(
+            str(local), target_info['uuid'],
+            custom_name=unique, custom_extension='txt',
+        )
+        file_uuids.append(uploaded['uuid'])
+        file_paths.append(f"{target_path}/{unique}.txt")
+
+    # Trash the entire folder
+    drive.trash_folder(target_info['uuid'])
+    print(f"\n🗑️  LIVE: Trashed non-empty folder {target_path}")
+
+    # Verify folder gone from parent listing
+    drive.folder_content_cache.clear()
+    parent_path = target_path.rsplit('/', 1)[0]
+    parent_info = drive.resolve_path(parent_path)
+    parent_listing = drive.get_folder_content(parent_info['uuid'])
+    parent_subfolders = [f.get('plainName') for f in parent_listing['folders']]
+    target_leaf = target_path.rsplit('/', 1)[1]
+    assert target_leaf not in parent_subfolders, (
+        f"Trashed folder still in parent listing: {parent_subfolders}"
+    )
+
+    # Verify child files no longer resolve under the old path
+    for path in file_paths:
+        with pytest.raises(FileNotFoundError):
+            drive.resolve_path(path)
+    print(f"✅ LIVE: Folder trash also removed all {len(file_paths)} children from listing")
+
+
+def test_live_upload_conflict_skip_does_not_replace(authed_session, sentinel_folder, tmp_path):
+    """Upload a file, then attempt to re-upload to the same target with
+    on_conflict='skip'. The result must be 'skipped' and the original
+    UUID must remain the canonical one for that path."""
+    drive = authed_session['drive']
+
+    # Use a fresh subfolder so there's no contamination from other tests
+    test_dir_path = _unique_subpath("conflict-skip")
+    test_dir = drive.create_folder_recursive(test_dir_path)
+
+    # Initial upload
+    name = _unique_name("conflict-target")
+    local_v1, payload_v1 = _write_payload(tmp_path, f"{name}.txt", size_bytes=64)
+    initial = drive.upload_file_to_folder(
+        str(local_v1), test_dir['uuid'],
+        custom_name=name, custom_extension='txt',
+    )
+    initial_uuid = initial['uuid']
+
+    # Same content, different local file path; same remote name → conflict
+    local_v2 = tmp_path / f"{name}_again.txt"
+    local_v2.write_bytes(b"second-attempt-different-bytes-" + uuid.uuid4().bytes)
+    result = drive.upload_single_item_with_conflict_handling(
+        local_v2,
+        target_remote_parent_path_str=test_dir_path,
+        target_folder_uuid=test_dir['uuid'],
+        on_conflict='skip',
+        remote_filename=f"{name}.txt",
+    )
+    assert result == 'skipped', f"Expected 'skipped', got {result!r}"
+
+    # Verify the file uuid AT that path is still the original
+    drive.folder_content_cache.clear()
+    resolved = drive.resolve_path(f"{test_dir_path}/{name}.txt")
+    assert resolved['uuid'] == initial_uuid, (
+        "File UUID changed despite on_conflict='skip'"
+    )
+
+    # And the bytes are still the original
+    download_dir = tmp_path / "downloads"
+    download_dir.mkdir()
+    out_path = drive.download_file(initial_uuid, str(download_dir))
+    assert Path(out_path).read_bytes() == payload_v1, (
+        "File content changed despite on_conflict='skip'"
+    )
+    print("✅ LIVE: on_conflict='skip' preserved original UUID + bytes")
+
+
+def test_live_upload_conflict_overwrite_replaces(authed_session, sentinel_folder, tmp_path):
+    """Upload a file, then re-upload with on_conflict='overwrite'.
+    The UUID changes (overwrite = trash old + upload new) but the path
+    resolves to a file with the NEW bytes."""
+    drive = authed_session['drive']
+
+    test_dir_path = _unique_subpath("conflict-overwrite")
+    test_dir = drive.create_folder_recursive(test_dir_path)
+
+    # First upload (content A)
+    name = _unique_name("overwrite-target")
+    local_v1, payload_v1 = _write_payload(tmp_path, f"{name}.txt", size_bytes=64)
+    initial = drive.upload_file_to_folder(
+        str(local_v1), test_dir['uuid'],
+        custom_name=name, custom_extension='txt',
+    )
+    initial_uuid = initial['uuid']
+
+    # Second upload (content B) with overwrite
+    local_v2 = tmp_path / f"{name}_v2.txt"
+    payload_v2 = b"OVERWRITTEN content " + uuid.uuid4().bytes
+    local_v2.write_bytes(payload_v2)
+
+    result = drive.upload_single_item_with_conflict_handling(
+        local_v2,
+        target_remote_parent_path_str=test_dir_path,
+        target_folder_uuid=test_dir['uuid'],
+        on_conflict='overwrite',
+        remote_filename=f"{name}.txt",
+    )
+    assert result == 'uploaded', f"Expected 'uploaded', got {result!r}"
+
+    # The path now resolves to a file with NEW content
+    drive.folder_content_cache.clear()
+    resolved = drive.resolve_path(f"{test_dir_path}/{name}.txt")
+    assert resolved['type'] == 'file'
+    new_uuid = resolved['uuid']
+    assert new_uuid != initial_uuid, (
+        "UUID unchanged after overwrite — overwrite=delete+upload, expected new uuid"
+    )
+
+    # Download via the new uuid; bytes must be v2
+    download_dir = tmp_path / "downloads"
+    download_dir.mkdir()
+    out_path = drive.download_file(new_uuid, str(download_dir))
+    downloaded = Path(out_path).read_bytes()
+    assert downloaded == payload_v2, (
+        f"Downloaded bytes don't match v2: {len(downloaded)} bytes"
+    )
+    assert downloaded != payload_v1, "Overwrite didn't actually replace content"
+    print("✅ LIVE: on_conflict='overwrite' produced new UUID with replaced bytes")
