@@ -271,40 +271,70 @@ a live Internxt backend, not more unit mocks.
 
 #### Live integration smoke test
 
-`tests/test_live_smoke.py` — opt-in test that runs against the real
+`tests/test_live_smoke.py` — **22 opt-in tests** that run against the real
 Internxt backend. Auto-skipped unless `IXT_ACCOUNT` and `IXT_PWD` are
-set in env (or in a gitignored `.env` file). Safety properties:
+set in env (or in a gitignored `.env` file).
+
+Safety properties:
 
 - All operations happen under a **sentinel folder**
   `/__pytest_internxt_cli_smoke__/<run-uuid>/` with a fresh UUID per
   run. Nothing outside that prefix is touched.
+- Every file/folder name within a test includes a per-call UUID suffix
+  so reruns are idempotent and never collide with prior attempt's
+  leftovers in the shared sentinel.
 - A try/finally cleanup trashes the entire sentinel folder at module
   teardown, even on test failure.
+- Auto-rerun on transient failures (rate-limit / eventual-consistency)
+  via `pytest-rerunfailures`, with up to 2 retries and a 2s delay.
 - **No cassette recording** — bytes and responses live only in memory;
   nothing about the user's account is written to the repo.
 
-Tests covered:
-1. Login + whoami (read-only)
-2. List root folder (read-only)
-3. End-to-end cycle: create folder → upload → list → download → assert
-   byte-for-byte recovery
-4. Path resolution against the live folder tree
+Coverage:
+
+| Category | Tests |
+|---|---|
+| Read-only smoke | login + whoami; list root; storage usage; user_info-known-404 |
+| Upload variations | full cycle (round-trip integrity); unicode filenames; extensionless files; 2 MB file (multipart-threshold path) |
+| Path operations | resolve_path; missing-path FileNotFoundError; list_folder_with_paths enrichment; recursive folder creation across 3 nesting levels (the cache-coherency regression) |
+| File operations | rename in place; move between folders; copy preserves content; update_file replaces content (WebDAV PUT path) |
+| Folder operations | rename; move to another parent |
+| Trash | trash_file removes from listing |
+| Search | server-side fuzzy finds uniquely-named upload (with retry for index latency); bogus query returns low-similarity results without crashing |
+| Find | client-side wildcard search returns exact match set |
 
 To run:
 
 ```bash
-# Once: put creds in .env (gitignored)
+# Once: put creds in .env (gitignored, never committed)
 echo 'IXT_ACCOUNT=you@example.com' > .env
 echo 'IXT_PWD=your-password' >> .env
 
-# Run the live smoke
-pytest tests/test_live_smoke.py -v -s
+# Run the live smoke (~60-90s)
+pytest tests/test_live_smoke.py -v
 
 # Force-skip (e.g., in CI)
 PYTEST_SKIP_LIVE=1 pytest
 ```
 
-This test surfaced the `create_folder_recursive` cache-coherency bug
-listed above (item 3 in the Critical bug-fix section), which all the
-unit-mocked tests missed because they stubbed `get_folder_content`
-directly.
+Live test results across 3 consecutive runs against a live account:
+22/22 → 22/22 → 22/22 (zero retries on the third run).
+
+These tests surfaced two real bugs that all 557 unit-mocked tests had
+missed:
+
+1. The `create_folder_recursive` **cache-coherency bug** (item 3 in the
+   Critical bug-fix section). Intermediate folders bypassed the parent
+   cache update; subsequent `resolve_path` walks fell through with
+   `FileNotFoundError` from the stale root cache.
+
+2. **`/drive/users/me` returns 404** on the live backend. The
+   `api.get_user_info()` helper is therefore dead code from the CLI's
+   perspective. A regression test now pins this down so we'll know if
+   the endpoint becomes available later.
+
+The bogus-search test also revealed that the Internxt fuzzy search is
+*very* fuzzy: even a 32-char random hex string returns ~10 substring/
+Levenshtein matches with 1-2% similarity scores. The test now asserts
+the response shape and that all returned matches are below a 10%
+similarity threshold, rather than incorrectly expecting an empty list.

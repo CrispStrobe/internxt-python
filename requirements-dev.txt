@@ -9,3 +9,8 @@ bandit>=1.7.0
 # Optional: load IXT_ACCOUNT/IXT_PWD from .env for the live smoke test
 # (tests fall back to a built-in parser if not installed)
 python-dotenv>=1.0.0
+
+# Auto-rerun flaky live integration tests on transient API failures
+# (rate limiting / eventual consistency). Required for tests/test_live_smoke.py
+# to be reliable end-to-end; not used by the main unit suite.
+pytest-rerunfailures>=12.0

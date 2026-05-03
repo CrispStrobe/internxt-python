@@ -332,21 +332,28 @@ list of bugs found and fixed during the test build-out.
 
 #### Live integration smoke (optional)
 
-`tests/test_live_smoke.py` runs an end-to-end cycle (login → create
-folder → upload → list → download → verify bytes → trash) against the
-real Internxt backend. Auto-skipped unless credentials are present.
+`tests/test_live_smoke.py` is a 22-test suite that runs end-to-end
+against the real Internxt backend, covering: login, list, upload (small
++ unicode + extensionless + 2 MB), download with byte-for-byte
+verification, recursive folder creation, file rename/move/copy/update,
+folder rename/move, trash, server-side fuzzy search, and client-side
+wildcard find. Auto-skipped unless credentials are present.
 
 ```bash
 # Put creds in a .env file (gitignored — never committed)
 echo 'IXT_ACCOUNT=you@example.com' > .env
 echo 'IXT_PWD=your-password' >> .env
 
-pytest tests/test_live_smoke.py -v -s
+# Runs in ~60-90 seconds, always cleans up
+pytest tests/test_live_smoke.py -v
 ```
 
 All operations happen inside a unique sentinel folder
 (`/__pytest_internxt_cli_smoke__/<run-uuid>/`) which is always trashed
-at teardown — your real files are never touched.
+at teardown — your real files are never touched. Every file/folder name
+within a test includes a UUID suffix so transient retries never
+collide. Transient API failures (rate-limit, eventual-consistency) are
+auto-retried via `pytest-rerunfailures`.
 
 ### Quality Gates
 
