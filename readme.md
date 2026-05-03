@@ -263,12 +263,17 @@ internxt-python/
 │   └── config.py             # Configuration management
 ├── services/
 │   ├── auth.py               # Authentication & login
-│   ├── crypto.py             # Encryption/decryption
+│   ├── crypto.py             # Encryption/decryption (AES-256-CTR)
 │   ├── drive.py              # Drive operations & path resolution
+│   ├── network_utils.py      # SSL cert lifecycle, range parsing
 │   ├── webdav_provider.py    # WsgiDAV provider for Internxt
 │   └── webdav_server.py      # WebDAV server management
-└── utils/
-    └── api.py                # HTTP API client
+├── utils/
+│   └── api.py                # HTTP API client
+├── tests/                    # Pytest suite (~400 tests, 71% coverage)
+├── pyproject.toml            # Pytest, coverage, ruff config
+├── requirements-dev.txt      # Dev/test dependencies
+└── .github/workflows/ci.yml  # Lint + type-check + test on Py 3.10/3.11/3.12
 ```
 
 ### Development Setup
@@ -284,8 +289,41 @@ source venv/bin/activate  # Linux/macOS
 
 # Install in development mode
 pip install -e .
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
+
+### Running Tests
+
+The project ships with a pytest suite covering crypto round-trips, path
+resolution, upload/download conflict handling, the WebDAV provider, and
+all major CLI commands.
+
+```bash
+# Run the full test suite
+pytest
+
+# With coverage report
+pytest --cov=services --cov=utils --cov=config
+
+# Run a specific test file
+pytest tests/test_crypto.py -v
+
+# In-CLI smoke check (no test framework needed)
+python cli.py test
+```
+
+### Quality Gates
+
+The CI runs four gates on every push/PR:
+
+```bash
+ruff check .                                                           # lint
+mypy --no-incremental cli.py services                                  # types
+bandit -r . -x ./.mypy_cache,./__pycache__,./.git,./tests -ll          # security (medium+)
+pytest --cov=services --cov=utils --cov=config                         # tests
+```
+
+All four must pass.
 
 ### Getting Help
 

@@ -1,3 +1,25 @@
 .git/
-**pycache**/
+**/__pycache__/
+*.pyc
 internxt_python_cli.egg-info/
+
+# Test / coverage / cache artifacts
+.coverage
+.coverage.*
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+coverage.xml
+
+# Virtualenvs
+venv/
+.venv/
+env/
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/

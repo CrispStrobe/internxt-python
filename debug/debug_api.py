@@ -113,8 +113,8 @@ def test_api_calls():
                 try:
                     json_data = response.json()
                     print(f"   ✅ JSON response: {type(json_data)} with keys: {list(json_data.keys())}")
-                except:
-                    print(f"   ⚠️  Response is not JSON")
+                except ValueError:
+                    print("   ⚠️  Response is not JSON")
                     print(f"   📋 First 200 chars: {response.text[:200]}")
             else:
                 print(f"   ❌ HTTP error: {response.status_code}")
@@ -125,10 +125,10 @@ def test_api_calls():
             import traceback
             traceback.print_exc()
         
-        print(f"\n🎯 Summary:")
-        print(f"   - If CLI method works but direct API calls fail, there's an issue with the API client")
-        print(f"   - If manual HTTP request fails, there's an authentication or network issue")
-        print(f"   - Check the status codes and error messages above")
+        print("\n🎯 Summary:")
+        print("   - If CLI method works but direct API calls fail, there's an issue with the API client")
+        print("   - If manual HTTP request fails, there's an authentication or network issue")
+        print("   - Check the status codes and error messages above")
         
     except Exception as e:
         print(f"❌ Test failed: {e}")

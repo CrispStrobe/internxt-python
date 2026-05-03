@@ -8,12 +8,11 @@ import io
 import time
 import tempfile
 import threading
-from typing import Dict, Any, List, Optional, Iterator, Union
-from pathlib import Path
+from typing import Dict, Any, List, Optional, Union
 
 try:
     from wsgidav.dav_provider import DAVProvider, DAVCollection, DAVNonCollection
-    from wsgidav.dav_error import DAVError, HTTP_NOT_FOUND, HTTP_FORBIDDEN, HTTP_CONFLICT
+    from wsgidav.dav_error import DAVError, HTTP_NOT_FOUND, HTTP_FORBIDDEN
     import mimetypes
 except ImportError:
     print("❌ Missing WebDAV dependency. Install with: pip install WsgiDAV")
@@ -99,7 +98,7 @@ class StreamingFileUpload:
         if self.temp_path and os.path.exists(self.temp_path):
             try:
                 os.unlink(self.temp_path)
-            except:
+            except OSError:
                 pass
     
     def __enter__(self):
@@ -232,11 +231,11 @@ webdav_api = WebDAVAPIClient()
 class InternxtDAVResource(DAVNonCollection):
     """Represents a file in Internxt Drive for WebDAV access"""
     
-    def __init__(self, path: str, environ: dict, file_metadata: dict = None, provider=None):
+    def __init__(self, path: str, environ: dict, file_metadata: Optional[dict] = None, provider=None):
         super().__init__(path, environ)
         self.file_metadata = file_metadata or {}
         self.provider = provider
-        self._upload_buffer = None
+        self._upload_buffer: Optional['StreamingFileUpload'] = None
         
     def get_content_length(self) -> int:
         """Return file size"""
@@ -380,9 +379,9 @@ class InternxtDAVResource(DAVNonCollection):
         """Called when writing is complete, with timestamp preservation support."""
         print(f"🏁 WEBDAV: end_write(with_errors={with_errors}) for {self.path}")
 
-        if with_errors or not hasattr(self, '_upload_buffer'):
+        if with_errors or self._upload_buffer is None:
             print("❌ WEBDAV: Upload had errors or no buffer, aborting")
-            if hasattr(self, '_upload_buffer'):
+            if self._upload_buffer is not None:
                 self._upload_buffer.cleanup()
             return
 
@@ -507,7 +506,7 @@ class InternxtDAVResource(DAVNonCollection):
                     # Clean up the temporary file after the upload operation is complete.
                     os.unlink(tmp_file_path)
             
-            print(f"✅ WEBDAV: Upload successful!")
+            print("✅ WEBDAV: Upload successful!")
 
             # Update resource metadata and clear parent cache
             if isinstance(result, dict):
@@ -519,9 +518,10 @@ class InternxtDAVResource(DAVNonCollection):
             print(f"❌ WEBDAV: Upload failed: {e}")
             import traceback
             traceback.print_exc()
-            raise DAVError(HTTP_FORBIDDEN, f"Upload failed: {e}")
+            raise DAVError(HTTP_FORBIDDEN, f"Upload failed: {e}") from e
         finally:
-            self._upload_buffer.cleanup()
+            if self._upload_buffer is not None:
+                self._upload_buffer.cleanup()
     
     def delete(self):
         """Delete this file"""
@@ -535,16 +535,16 @@ class InternxtDAVResource(DAVNonCollection):
                 raise DAVError(HTTP_NOT_FOUND, "File not found")
             
             # Use the actual trash_file method from drive_service
-            result = drive_service.trash_file(file_uuid)
-            
+            drive_service.trash_file(file_uuid)
+
             # Mark as deleted to avoid unnecessary lookups
             webdav_api.mark_deleted(self.path)
-            
+
             print(f"✅ WEBDAV: Deleted file {self.path}")
-            
+
         except Exception as e:
             print(f"❌ WEBDAV: Error deleting file: {e}")
-            raise DAVError(HTTP_FORBIDDEN, f"Could not delete file: {e}")
+            raise DAVError(HTTP_FORBIDDEN, f"Could not delete file: {e}") from e
     
     def move_recursive(self, dest_path):
         """Move/rename this file"""
@@ -570,26 +570,26 @@ class InternxtDAVResource(DAVNonCollection):
             if src_dir != dest_dir:
                 # Moving to different folder
                 dest_parent = drive_service.resolve_path(dest_dir)
-                result = drive_service.move_file(file_uuid, dest_parent['uuid'])
-            
+                drive_service.move_file(file_uuid, dest_parent['uuid'])
+
             # Check if we need to rename
             current_full_name = self.file_metadata.get('plainName', '')
             current_type = self.file_metadata.get('type', '')
             if current_type:
                 current_full_name = f"{current_full_name}.{current_type}"
-            
+
             if current_full_name != new_name:
                 # Need to rename
-                result = drive_service.rename_file(file_uuid, new_name)
-            
+                drive_service.rename_file(file_uuid, new_name)
+
             # Mark old path as deleted
             webdav_api.mark_deleted(self.path)
-            
+
             print(f"✅ WEBDAV: Moved file to {dest_path}")
-            
+
         except Exception as e:
             print(f"❌ WEBDAV: Error moving file: {e}")
-            raise DAVError(HTTP_FORBIDDEN, f"Could not move file: {e}")
+            raise DAVError(HTTP_FORBIDDEN, f"Could not move file: {e}") from e
     
     def copy_move(self, dest_path):
         """Copy this file"""
@@ -611,24 +611,24 @@ class InternxtDAVResource(DAVNonCollection):
                 parent_uuid = credentials['user'].get('rootFolderId', '')
             
             # Use the copy_item method from drive_service
-            result = drive_service.copy_item(self.file_metadata['uuid'], parent_uuid)
-            
+            drive_service.copy_item(self.file_metadata['uuid'], parent_uuid)
+
             print(f"✅ WEBDAV: Copied file to {dest_path}")
-            
+
         except Exception as e:
             print(f"❌ WEBDAV: Error copying file: {e}")
-            raise DAVError(HTTP_FORBIDDEN, f"Could not copy file: {e}")
+            raise DAVError(HTTP_FORBIDDEN, f"Could not copy file: {e}") from e
 
 
 class InternxtDAVCollection(DAVCollection):
     """Represents a folder in Internxt Drive for WebDAV access"""
     
-    def __init__(self, path: str, environ: dict, folder_metadata: dict = None, provider=None):
+    def __init__(self, path: str, environ: dict, folder_metadata: Optional[dict] = None, provider=None):
         super().__init__(path, environ)
         self.folder_metadata = folder_metadata or {}
         self.provider = provider
-        self._content_cache = None
-        self._content_cached_time = 0
+        self._content_cache: Optional[Dict[str, Any]] = None
+        self._content_cached_time: float = 0.0
         self.CACHE_TIMEOUT = 300 # 5 min
         
     def get_member_names(self) -> List[str]:
@@ -735,7 +735,7 @@ class InternxtDAVCollection(DAVCollection):
     def set_property(self, name, value, depth="0"):
         """Set a property (called by PROPPATCH)."""
         from services.drive import drive_service
-        from wsgidav.util import rfc_1123_to_timestamp, rfc_3339_to_timestamp
+        from wsgidav.util import parse_time_string
         from datetime import datetime, timezone
 
         print(f"🔍 WEBDAV: PROPPATCH set_property('{name}', '{value}')")
@@ -746,32 +746,33 @@ class InternxtDAVCollection(DAVCollection):
                 dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
                 iso_timestamp = dt.isoformat()
                 drive_service.set_folder_timestamps(
-                    self.folder_metadata['uuid'], 
+                    self.folder_metadata['uuid'],
                     creation_time=iso_timestamp
                 )
             except Exception as e:
                 print(f"❌ WEBDAV: Error setting creationdate: {e}")
-                raise DAVError(HTTP_FORBIDDEN, "Failed to set creation date")
-        
+                raise DAVError(HTTP_FORBIDDEN, "Failed to set creation date") from e
+
         elif name in ("{DAV:}getlastmodified", "{urn:schemas-microsoft-com:}Win32LastModifiedTime"):
             try:
-                # Timestamps can come in different formats
-                try:
-                    ts = rfc_1123_to_timestamp(value)
-                except ValueError:
-                    ts = rfc_3339_to_timestamp(value)
-                
+                # Accept RFC 1123 ("Wed, 21 Oct 2015 07:28:00 GMT") via wsgidav
+                # helper, falling back to ISO 8601 / RFC 3339 via stdlib.
+                ts = parse_time_string(value)
+                if ts is None:
+                    dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                    ts = dt.timestamp()
+
                 dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                 iso_timestamp = dt.isoformat()
-                
+
                 drive_service.set_folder_timestamps(
-                    self.folder_metadata['uuid'], 
+                    self.folder_metadata['uuid'],
                     modification_time=iso_timestamp
                 )
             except Exception as e:
                 print(f"❌ WEBDAV: Error setting getlastmodified: {e}")
-                raise DAVError(HTTP_FORBIDDEN, "Failed to set modification date")
-        
+                raise DAVError(HTTP_FORBIDDEN, "Failed to set modification date") from e
+
         else:
             print(f"⚠️  WEBDAV: Ignored set_property for '{name}'")
             super().set_property(name, value, depth)
@@ -792,16 +793,16 @@ class InternxtDAVCollection(DAVCollection):
                 folder_uuid = resolved['uuid']
             
             # Use the actual trash_folder method from drive_service
-            result = drive_service.trash_folder(folder_uuid)
-            
+            drive_service.trash_folder(folder_uuid)
+
             # Mark as deleted to avoid unnecessary lookups
             webdav_api.mark_deleted(self.path)
-            
+
             print(f"✅ WEBDAV: Deleted folder {self.path}")
-            
+
         except Exception as e:
             print(f"❌ WEBDAV: Error deleting folder: {e}")
-            raise DAVError(HTTP_FORBIDDEN, f"Could not delete folder: {e}")
+            raise DAVError(HTTP_FORBIDDEN, f"Could not delete folder: {e}") from e
     
     def move_recursive(self, dest_path):
         """Move/rename this folder"""
@@ -828,14 +829,14 @@ class InternxtDAVCollection(DAVCollection):
             if src_dir != dest_dir:
                 # Moving to different folder
                 dest_parent = drive_service.resolve_path(dest_dir)
-                result = drive_service.move_folder(folder_uuid, dest_parent['uuid'])
-            
+                drive_service.move_folder(folder_uuid, dest_parent['uuid'])
+
             # Check if we need to rename
             current_name = self.folder_metadata.get('plainName', self.folder_metadata.get('name', ''))
-            
+
             if current_name != new_name:
                 # Need to rename
-                result = drive_service.rename_folder(folder_uuid, new_name)
+                drive_service.rename_folder(folder_uuid, new_name)
             
             # Mark old path as deleted
             webdav_api.mark_deleted(self.path)
@@ -887,7 +888,7 @@ class InternxtDAVCollection(DAVCollection):
         
         try:
             member_count = len(self._get_content().get('names', []))
-        except:
+        except Exception:
             member_count = 0
         
         # Return WITHOUT quotes - WsgiDAV adds them automatically

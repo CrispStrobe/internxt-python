@@ -5,31 +5,28 @@ internxt_cli/services/webdav_server.py
 
 import os
 import sys
-import time
 import signal
-import threading
 import socket
-import tempfile
 import atexit
-from typing import Optional, Dict, Any, Tuple
-from pathlib import Path
+from typing import Optional, Dict, Any
 
 try:
     from wsgidav.wsgidav_app import WsgiDAVApp
-    from wsgidav.fs_dav_provider import FilesystemProvider
 except ImportError:
     print("❌ Missing WebDAV dependencies. Install with:")
     print("   pip install WsgiDAV")
     sys.exit(1)
 
 # Try different WSGI servers
-WSGI_SERVER = None
+WSGI_SERVER: Optional[str] = None
+serve: Any = None
+wsgi: Any = None
 try:
-    from waitress import serve
+    from waitress import serve  # type: ignore[import-untyped, no-redef]  # noqa: F811
     WSGI_SERVER = 'waitress'
 except ImportError:
     try:
-        from cheroot import wsgi
+        from cheroot import wsgi  # noqa: F811
         WSGI_SERVER = 'cheroot'
     except ImportError:
         print("❌ No suitable WSGI server found. Install one of:")
@@ -37,9 +34,8 @@ except ImportError:
         print("   pip install cheroot")
         sys.exit(1)
 
-from config.config import config_service
-from services.auth import auth_service
-from services.webdav_provider import InternxtDAVProvider
+from config.config import config_service  # noqa: E402
+from services.webdav_provider import InternxtDAVProvider  # noqa: E402
 
 
 class WebDAVServer:
@@ -150,20 +146,23 @@ class WebDAVServer:
             
             if port is None:
                 port = int(webdav_config.get('port', 8080))
-            
+
             protocol = webdav_config.get('protocol', 'http')
-            
+
+            # Default to loopback only. Users can override with `host` in
+            # webdav config (e.g. "0.0.0.0" for LAN access).
+            host = webdav_config.get('host', '127.0.0.1')
+
             # Create provider with timestamp preservation setting
             provider = InternxtDAVProvider(preserve_timestamps=preserve_timestamps)
-            
+
             # Configure WsgiDAV
             config = {
-                "host": "0.0.0.0",
+                "host": host,
                 "port": port,
                 "provider_mapping": {"/": provider},
                 "simple_dc": {"user_mapping": {"*": {"internxt": {"password": "internxt-webdav"}}}},
                 "verbose": 1,
-                # "enable_loggers": [], # <-- REMOVED deprecated key
                 "logging": {
                     "enable": True,
                     "enable_loggers": ["wsgidav"],
@@ -186,33 +185,43 @@ class WebDAVServer:
             # WSGI_SERVER (global) is our 'auto' default
             # We only override if the user forces a choice.
             
+            active_server: Optional[str] = None
             if server_choice == 'waitress':
                 try:
-                    from waitress import serve
+                    from waitress import serve  # noqa: F401  (kept in scope below)
                     active_server = 'waitress'
-                except ImportError:
-                    raise ImportError("Server choice 'waitress' is not installed. Run: pip install waitress")
-            
+                except ImportError as exc:
+                    raise ImportError(
+                        "Server choice 'waitress' is not installed. Run: pip install waitress"
+                    ) from exc
+
             elif server_choice == 'cheroot':
                 try:
-                    from cheroot import wsgi
+                    from cheroot import wsgi  # noqa: F401
                     active_server = 'cheroot'
-                except ImportError:
-                    raise ImportError("Server choice 'cheroot' is not installed. Run: pip install cheroot")
-            
+                except ImportError as exc:
+                    raise ImportError(
+                        "Server choice 'cheroot' is not installed. Run: pip install cheroot"
+                    ) from exc
+
             elif server_choice == 'auto':
-                active_server = WSGI_SERVER # Use the globally-detected one
-            
+                active_server = WSGI_SERVER  # Use the globally-detected one
+            else:
+                raise ValueError(
+                    f"Unknown server choice '{server_choice}'. "
+                    "Use 'auto', 'waitress', or 'cheroot'."
+                )
+
             if active_server is None:
-                 raise ImportError("No suitable WSGI server found. Install 'waitress' or 'cheroot'")
+                raise ImportError("No suitable WSGI server found. Install 'waitress' or 'cheroot'")
             
             # SSL Configuration
             ssl_adapter = None
             if protocol.lower() == 'https':
                 try:
                     if active_server == 'waitress':
-                        print(f"⚠️  Warning: SSL (HTTPS) is not supported with the 'waitress' server.")
-                        print(f"   Serving over HTTP instead.")
+                        print("⚠️  Warning: SSL (HTTPS) is not supported with the 'waitress' server.")
+                        print("   Serving over HTTP instead.")
                         protocol = 'http'
                         server_url = f"http://localhost:{port}/" # Fallback to HTTP
                     elif active_server == 'cheroot':
@@ -232,21 +241,21 @@ class WebDAVServer:
                     protocol = 'http'
                     ssl_adapter = None
             
-            print(f"✅ WebDAV server starting...")
+            print("✅ WebDAV server starting...")
             print(f"🌐 URL: {server_url}")
-            print(f"👤 Username: internxt")
-            print(f"🔑 Password: internxt-webdav")
+            print("👤 Username: internxt")
+            print("🔑 Password: internxt-webdav")
             print(f"🕐 Timestamp Preservation: {'Enabled' if preserve_timestamps else 'Disabled'}")
             print(f"🚀 Using server: {active_server}")
 
             if active_server == 'waitress':
-                from waitress import serve
-                
+                from waitress import serve  # noqa: F811
+
                 # Waitress SSL is passed as arguments
                 if protocol.lower() == 'https':
                     serve(
                         self.app,
-                        host="0.0.0.0",
+                        host=host,
                         port=port,
                         ssl_certificate=str(NetworkUtils.WEBDAV_SSL_CERT_FILE),
                         ssl_private_key=str(NetworkUtils.WEBDAV_SSL_KEY_FILE),
@@ -254,14 +263,14 @@ class WebDAVServer:
                 else:
                     serve(
                         self.app,
-                        host="0.0.0.0",
+                        host=host,
                         port=port,
                     )
-                    
+
             elif active_server == 'cheroot':
-                from cheroot import wsgi
+                from cheroot import wsgi  # noqa: F811
                 server = wsgi.Server(
-                    bind_addr=("0.0.0.0", port),
+                    bind_addr=(host, port),
                     wsgi_app=self.app,
                 )
                 
@@ -313,8 +322,8 @@ class WebDAVServer:
             
             print(f"\n🌐 WebDAV server starting on {server_url}")
             print(f"📁 Mount point: {server_url}")
-            print(f"👤 Username: internxt")
-            print(f"🔑 Password: internxt-webdav")
+            print("👤 Username: internxt")
+            print("🔑 Password: internxt-webdav")
             print()
             print("🌐 Web interface available at:", server_url)
             print()

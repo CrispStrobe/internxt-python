@@ -5,7 +5,6 @@ Debug script for file decryption
 
 import sys
 import os
-import json
 
 # Add current directory to path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -53,7 +52,7 @@ def debug_file_download():
         print(f"📋 File ID: {metadata.get('fileId')}")
         
         # Get download info
-        print(f"\n🔍 Getting download links...")
+        print("\n🔍 Getting download links...")
         network_auth = drive_service._get_network_auth(user)
         
         links_response = api_client.get_download_links(
@@ -66,7 +65,7 @@ def debug_file_download():
         print(f"📋 Index length: {len(links_response.get('index', ''))}")
         
         # Download encrypted data
-        print(f"\n🔍 Downloading encrypted data...")
+        print("\n🔍 Downloading encrypted data...")
         download_url = links_response['shards'][0]['url']
         encrypted_data = api_client.download_chunk(download_url)
         
@@ -74,7 +73,7 @@ def debug_file_download():
         print(f"📋 First 16 bytes (hex): {encrypted_data[:16].hex()}")
         
         # Test decryption
-        print(f"\n🔍 Testing decryption...")
+        print("\n🔍 Testing decryption...")
         file_index_hex = links_response['index']
         
         # Debug the decryption inputs
@@ -91,7 +90,7 @@ def debug_file_download():
                 file_index_hex
             )
             
-            print(f"✅ Decryption successful!")
+            print("✅ Decryption successful!")
             print(f"📋 Decrypted size: {len(decrypted_data)} bytes")
             print(f"📋 Decrypted content: {decrypted_data}")
             print(f"📋 Decrypted as text: {decrypted_data.decode('utf-8', errors='replace')}")
@@ -102,7 +101,7 @@ def debug_file_download():
             traceback.print_exc()
         
         # Let's also test the key generation
-        print(f"\n🔍 Testing key generation...")
+        print("\n🔍 Testing key generation...")
         
         # Convert index to bytes
         index_bytes = bytes.fromhex(file_index_hex)

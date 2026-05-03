@@ -6,17 +6,16 @@ install.py
 
 import subprocess
 import sys
-import os
 from pathlib import Path
 
 def log(message, status="INFO"):
     icons = {"INFO": "ℹ️", "SUCCESS": "✅", "ERROR": "❌", "WARNING": "⚠️"}
     print(f"{icons.get(status, 'ℹ️')} {message}")
 
-def run_command(command):
-    """Run a command and return success status"""
+def run_command(args):
+    """Run a command (list of argv) and return success status"""
     try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(args, capture_output=True, text=True, timeout=120, check=False)
         return result.returncode == 0, result.stdout, result.stderr
     except Exception as e:
         return False, "", str(e)
@@ -24,36 +23,36 @@ def run_command(command):
 def install_dependencies():
     """Install required dependencies"""
     log("Installing dependencies...", "INFO")
-    
+
     dependencies = [
         "requests>=2.31.0",
-        "cryptography>=41.0.0", 
+        "cryptography>=41.0.0",
         "mnemonic>=0.20",
         "click>=8.1.0",
         "tqdm>=4.65.0"
     ]
-    
+
     for dep in dependencies:
         log(f"Installing {dep}...", "INFO")
-        success, stdout, stderr = run_command(f"pip install '{dep}'")
+        success, _stdout, stderr = run_command([sys.executable, "-m", "pip", "install", dep])
         if success:
             log(f"✅ {dep.split('>=')[0]} installed", "SUCCESS")
         else:
             log(f"❌ Failed to install {dep}: {stderr}", "ERROR")
             return False
-    
+
     return True
 
 def test_standalone_cli():
     """Test the standalone CLI"""
     log("Testing standalone CLI...", "INFO")
-    
+
     if not Path("cli.py").exists():
         log("cli.py not found in current directory", "ERROR")
         return False
-    
+
     # Test basic functionality
-    success, stdout, stderr = run_command("python cli.py test")
+    success, _stdout, stderr = run_command([sys.executable, "cli.py", "test"])
     if success:
         log("Standalone CLI test passed", "SUCCESS")
         return True

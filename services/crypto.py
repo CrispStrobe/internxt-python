@@ -7,7 +7,7 @@ import os
 import hashlib
 import base64
 import hmac
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Optional
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
@@ -119,19 +119,19 @@ class CryptoService:
         
         return self.encrypt_meta(filename, encryption_key, encryption_iv)
 
-    def decrypt_filename(self, mnemonic: str, bucket_id: str, encrypted_name: str) -> str:
+    def decrypt_filename(self, mnemonic: str, bucket_id: str, encrypted_name: str) -> Optional[str]:
         """
         Decrypt filename using Internxt protocol
         """
         bucket_key = self.generate_bucket_key(mnemonic, bucket_id)
-        
+
         # Generate decryption key using BUCKET_META_MAGIC
         key = hmac.new(
             bytes.fromhex(bucket_key),
             BUCKET_META_MAGIC,
             hashlib.sha512
         ).hexdigest()
-        
+
         return self.decrypt_meta(encrypted_name, key)
 
     def generate_bucket_key(self, mnemonic: str, bucket_id: str) -> str:
@@ -153,7 +153,7 @@ class CryptoService:
 
     def generate_filename_encryption_iv(self, bucket_key: str, bucket_id: str, filename: str) -> bytes:
         """Generate encryption IV for filename"""
-        hasher = hmac.new(bytes.fromhex(bucket_key), hashlib.sha512)
+        hasher = hmac.new(bytes.fromhex(bucket_key), digestmod=hashlib.sha512)
         hasher.update(bucket_id.encode())
         hasher.update(filename.encode())
         return hasher.digest()[:32]
@@ -170,40 +170,42 @@ class CryptoService:
         result = auth_tag + iv + cipher_text
         return base64.b64encode(result).decode('ascii')
 
-    def decrypt_meta(self, buffer_base64: str, decrypt_key: str) -> str:
+    def decrypt_meta(self, buffer_base64: str, decrypt_key: str) -> Optional[str]:
         """Decrypt metadata using AES-256-GCM"""
         try:
             data = base64.b64decode(buffer_base64)
-            
+
             # Extract components
             GCM_DIGEST_SIZE = 16
             SHA256_DIGEST_SIZE = 32
-            
+
             digest = data[:GCM_DIGEST_SIZE]
             iv = data[GCM_DIGEST_SIZE:GCM_DIGEST_SIZE + SHA256_DIGEST_SIZE]
             buffer = data[GCM_DIGEST_SIZE + SHA256_DIGEST_SIZE:]
-            
+
             # Create decipher with auth tag
             key_bytes = bytes.fromhex(decrypt_key)[:32]
             cipher = Cipher(algorithms.AES(key_bytes), modes.GCM(iv[:16], digest), backend=self.backend)
             decryptor = cipher.decryptor()
-            
+
             decrypted = decryptor.update(buffer) + decryptor.finalize()
             return decrypted.decode('utf-8')
-            
+
         except Exception:
             return None
 
     # Configuration encryption methods (unchanged)
-    def pass_to_hash(self, password: str, salt: str = None) -> dict:
+    def pass_to_hash(self, password: str, salt: Optional[str] = None) -> dict:
         if salt is None:
             salt_bytes = os.urandom(16)
             salt = salt_bytes.hex()
         else:
             salt_bytes = bytes.fromhex(salt)
-        
+
+        # SHA1 is required here for compatibility with the Internxt server's
+        # PBKDF2 password hash format. Do not change without backend changes.
         kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA1(),
+            algorithm=hashes.SHA1(),  # nosec B303 - protocol compatibility
             length=32,
             salt=salt_bytes,
             iterations=10000,
@@ -250,11 +252,13 @@ class CryptoService:
         return decrypted.decode('utf-8')
 
     def _get_key_and_iv_from(self, secret: str, salt: bytes) -> Tuple[bytes, bytes]:
+        # MD5 is required here to match OpenSSL's EVP_BytesToKey, which the
+        # Internxt CLI uses for credential file encryption. Do not change.
         password = secret.encode('latin-1') + salt
         md5_hashes = []
         digest = password
         for _ in range(3):
-            md5_hashes.append(hashlib.md5(digest).digest())
+            md5_hashes.append(hashlib.md5(digest, usedforsecurity=False).digest())  # nosec B324
             digest = md5_hashes[-1] + password
         key = md5_hashes[0] + md5_hashes[1]
         iv = md5_hashes[2]

@@ -48,10 +48,7 @@ class ConfigService:
         self.webdav_default_timeout = 0
 
         self.config = {
-            'DRIVE_NEW_API_URL' : "https://gateway.internxt.com/drive",
-            'NETWORK_URL' : "https://gateway.internxt.com/network",
-            #'DRIVE_WEB_URL': 'https://drive.internxt.com',
-            #'DRIVE_NEW_API_URL': 'https://api.internxt.com/drive',
+            'DRIVE_NEW_API_URL': "https://gateway.internxt.com/drive",
             'NETWORK_URL': 'https://api.internxt.com',
             'APP_CRYPTO_SECRET': '6KYQBP847D4ATSFA',
             'APP_MAGIC_IV': 'd139cb9a2cd17092e79e1861cf9d7023',
@@ -203,7 +200,7 @@ class ConfigService:
                         try:
                             dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
                             result[key] = dt.isoformat()
-                        except:
+                        except (ValueError, TypeError):
                             result[key] = value
                     else:
                         result[key] = value
@@ -236,23 +233,25 @@ class ConfigService:
         try:
             with open(self.webdav_configs_file, 'r', encoding='utf-8') as f:
                 configs_data = f.read()
-                
+
             configs = json.loads(configs_data)
-            
+
             return {
+                'host': configs.get('host', '127.0.0.1'),  # loopback by default
                 'port': configs.get('port', self.webdav_default_port),
                 'protocol': configs.get('protocol', self.webdav_default_protocol),
                 'timeoutMinutes': configs.get('timeoutMinutes', self.webdav_default_timeout),
-                'preserveTimestamps': configs.get('preserveTimestamps', True),  # NEW: Default to True
+                'preserveTimestamps': configs.get('preserveTimestamps', True),
             }
-            
+
         except Exception:
             # Return default config with timestamp preservation enabled
             return {
+                'host': '127.0.0.1',
                 'port': self.webdav_default_port,
                 'protocol': self.webdav_default_protocol,
                 'timeoutMinutes': self.webdav_default_timeout,
-                'preserveTimestamps': True,  # NEW: Default to True
+                'preserveTimestamps': True,
             }
 
     def _ensure_internxt_cli_data_dir_exists(self) -> None:

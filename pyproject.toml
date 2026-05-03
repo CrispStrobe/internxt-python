@@ -1,0 +1,32 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "-q",
+    "--strict-markers",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["services", "utils", "config"]
+omit = ["*/__pycache__/*", "*/.mypy_cache/*"]
+
+[tool.coverage.report]
+show_missing = false
+skip_covered = false
+
+[tool.ruff]
+line-length = 120
+extend-exclude = [".mypy_cache", "__pycache__", "debug"]
+
+[tool.ruff.lint]
+# F (pyflakes) and E (pycodestyle errors) catch real bugs.
+# W (warnings) is purely cosmetic — skip to keep the audit signal-to-noise high.
+# Bandit/mypy run separately in CI.
+select = ["E", "F"]
+ignore = [
+    "E501",  # line length — covered by `line-length` above where we want it
+    "E402",  # imports below code — intentional in webdav_server.py
+    "E701",  # multiple statements on one line — already audited
+]

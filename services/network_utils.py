@@ -7,8 +7,8 @@ Network utilities for SSL certificate management (FINAL FIXED VERSION)
 import os
 import hashlib
 import ipaddress  # FIXED: Added missing import
-from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -273,7 +273,7 @@ class NetworkUtils:
             }
     
     @classmethod
-    def parse_range_header(cls, range_header: str, file_size: int) -> Dict[str, Any]:
+    def parse_range_header(cls, range_header: str, file_size: int) -> Optional[Dict[str, Any]]:
         """
         Parse HTTP Range header for partial content requests
         Returns range information or None if invalid/not supported
@@ -332,15 +332,20 @@ class NetworkUtils:
         try:
             import requests
             from requests.auth import HTTPBasicAuth
-            
+
             auth = HTTPBasicAuth(username, password)
-            
+
+            # Self-signed cert acceptance is only safe for localhost loopback.
+            host = (urlparse(url).hostname or '').lower()
+            is_loopback = host in ('localhost', '127.0.0.1', '::1')
+            verify_tls = not is_loopback
+
             # Test OPTIONS request (WebDAV discovery)
             response = requests.options(
-                url, 
-                auth=auth, 
-                timeout=10, 
-                verify=False,  # Allow self-signed certificates
+                url,
+                auth=auth,
+                timeout=10,
+                verify=verify_tls,  # nosec B501 - self-signed cert allowed only for loopback
                 headers={'User-Agent': 'Internxt WebDAV Test Client'}
             )
             

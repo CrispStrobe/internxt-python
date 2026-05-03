@@ -6,8 +6,6 @@ API client matching Internxt SDK
 
 import requests
 import json
-import sys
-import os
 from typing import Dict, Any, Optional, List
 
 from config.config import config_service
@@ -145,9 +143,11 @@ class ApiClient:
 
     # ========== HTTP VERB METHODS ==========
 
-    def delete(self, url: str, headers: Dict[str, str] = None, auth: Optional[tuple] = None) -> Dict[str, Any]:
+    def delete(self, url: str, data: Optional[Dict[str, Any]] = None,
+               headers: Optional[Dict[str, str]] = None,
+               auth: Optional[tuple] = None) -> Dict[str, Any]:
         """Make DELETE request and return JSON"""
-        response = self._make_request("DELETE", url, headers=headers, auth=auth)
+        response = self._make_request("DELETE", url, data=data, headers=headers, auth=auth)
         return response.json() if response.content else {}
     
     def put(self, url: str, data: Dict[str, Any] = None, headers: Dict[str, str] = None, auth: Optional[tuple] = None) -> Dict[str, Any]:
@@ -356,7 +356,7 @@ class ApiClient:
         """
         url = f"{self.drive_api_url}/storage/trash"
         data = {'items': [{'uuid': item_uuid, 'type': item_type}]}
-        return self.delete(url, headers={'Content-Type': 'application/json'})
+        return self.delete(url, data=data, headers={'Content-Type': 'application/json'})
 
     # ========== PATH-BASED OPERATIONS ==========
 
@@ -434,23 +434,6 @@ class ApiClient:
         """
         url = f"{self.drive_api_url}/files/{file_uuid}"
         return self.put(url, data=payload)
-    
-    def move_file(self, file_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
-        """
-        SDK MATCH: PATCH /files/{fileUuid} with destinationFolder field.
-        """
-        url = f"{self.drive_api_url}/files/{file_uuid}"
-        # Use 'destinationFolder' as required by the modern API
-        data = {'destinationFolder': destination_folder_uuid}
-        return self.patch(url, data=data)
-
-    def move_folder(self, folder_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
-        """
-        SDK MATCH: PATCH /folders/{folderUuid} with destinationFolder field.
-        """
-        url = f"{self.drive_api_url}/folders/{folder_uuid}"
-        data = {'destinationFolder': destination_folder_uuid}
-        return self.patch(url, data=data)
 
     # ========== SEARCH OPERATIONS ==========
 
@@ -479,17 +462,17 @@ class ApiClient:
         """Basic health check"""
         try:
             return self.get_user_info()
-        except:
+        except Exception:
             return {'status': 'error', 'message': 'Health check failed'}
 
     # ========== WEBDAV COMPATIBILITY LAYER ==========
-    
+
     def move_item(self, item_uuid: str, destination_folder_uuid: str) -> Dict[str, Any]:
         """WebDAV compatibility: Move file or folder"""
         # Try as file first
         try:
             return self.move_file(item_uuid, destination_folder_uuid)
-        except:
+        except Exception:
             # If file move fails, try as folder
             return self.move_folder(item_uuid, destination_folder_uuid)
 
@@ -504,7 +487,7 @@ class ApiClient:
                 return self.rename_file(item_uuid, plain_name, file_type)
             else:
                 return self.rename_file(item_uuid, new_name)
-        except:
+        except Exception:
             # If file rename fails, try as folder
             return self.rename_folder(item_uuid, new_name)
 
@@ -513,8 +496,8 @@ class ApiClient:
         # Try as file first
         try:
             return self.trash_file(item_uuid)
-        except:
-            # If file trash fails, try as folder  
+        except Exception:
+            # If file trash fails, try as folder
             return self.trash_folder(item_uuid)
 
     def update_file(self, file_uuid: str, new_file_id: str, new_size: int) -> Dict[str, Any]:

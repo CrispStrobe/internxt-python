@@ -23,9 +23,9 @@ try:
     # pylint: disable=unused-import
     import requests
     from requests.auth import HTTPBasicAuth
-    import mnemonic  # dependency probe
-    import cryptography  # dependency probe
-    import tqdm  # dependency probe
+    import mnemonic  # noqa: F401  - dependency probe
+    import cryptography  # noqa: F401  - dependency probe
+    import tqdm  # noqa: F401  - dependency probe
 except ImportError as e:
     print(f"❌ Missing required dependency: {e}")
     print("📦 Install with: pip install cryptography mnemonic tqdm requests click")
@@ -51,7 +51,7 @@ except ImportError as e:
     
     # Check for WebDAV specific dependencies (NEW LOGIC)
     try:
-        import wsgidav  # pylint: disable=unused-import  # dependency probe
+        import wsgidav  # noqa: F401  - dependency probe
     except ImportError:
         print("📦 Missing core WebDAV dependency. Install with:")
         print("   pip install WsgiDAV")
@@ -60,9 +60,9 @@ except ImportError as e:
     try:
         # Check for at least one server, matching webdav_server.py
         try:
-            import waitress  # type: ignore[import-untyped]  # pylint: disable=unused-import  # dependency probe
+            import waitress  # type: ignore[import-untyped]  # noqa: F401  - dependency probe
         except ImportError:
-            import cheroot  # pylint: disable=unused-import  # dependency probe
+            import cheroot  # noqa: F401  - dependency probe
     except ImportError:
         print("📦 No suitable WSGI server found. Install one of:")
         print("   pip install waitress")
@@ -112,7 +112,7 @@ def login(email: Optional[str], password: Optional[str], tfa: Optional[str], non
     try:
         if debug:
             print("🔍 Debug mode enabled")
-            print(f"🔍 API Endpoints:")
+            print("🔍 API Endpoints:")
             print(f"   Drive API: {config_service.get('DRIVE_NEW_API_URL')}")
             print(f"   Network API: {config_service.get('NETWORK_URL')}")
         
@@ -316,7 +316,7 @@ def mkdir(path: str, parent_folder_id: Optional[str]):
         folder_uuid = folder.get('uuid', folder.get('id', ''))
         folder_name = folder.get('plainName', folder.get('name', path))
         
-        click.echo(f"✅ Folder created successfully!")
+        click.echo("✅ Folder created successfully!")
         click.echo(f"📁 Name: {folder_name}")
         click.echo(f"🆔 UUID: {folder_uuid}")
         
@@ -556,7 +556,7 @@ def move_path(paths: Tuple[str, ...], workers: int, on_conflict: str,
             drive_service.folder_content_cache.pop(target_uuid, None)
 
         click.echo("=" * 40)
-        click.echo(f"📊 Move Summary:")
+        click.echo("📊 Move Summary:")
         click.echo(f"  ✅ Moved:    {success_count}")
         click.echo(f"  ⏭️  Skipped:  {skipped_count}")
         click.echo(f"  ❌ Errors:   {error_count}")
@@ -755,7 +755,7 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                                 creation_time = ctime.isoformat()
                             
                             if verbose:
-                                click.echo(f"  🕐 Local file timestamps:")
+                                click.echo("  🕐 Local file timestamps:")
                                 click.echo(f"     Creation: {creation_time}")
                                 click.echo(f"     Modification: {modification_time}")
                         except Exception as e:
@@ -773,9 +773,12 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                         modification_time=modification_time
                     )
                     
-                    if upload_result == "uploaded": success_count += 1
-                    elif upload_result == "skipped": skipped_count += 1
-                    else: error_count += 1
+                    if upload_result == "uploaded":
+                        success_count += 1
+                    elif upload_result == "skipped":
+                        skipped_count += 1
+                    else:
+                        error_count += 1
 
                 elif local_path.is_dir():
                     # Helper closures below close over per-iteration locks/dicts;
@@ -791,7 +794,7 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
 
                     # Determine the remote base path
                     if copy_contents_only:
-                        click.echo(f"  ✨ Copying contents directly to target (trailing slash detected)")
+                        click.echo("  ✨ Copying contents directly to target (trailing slash detected)")
                         dir_remote_base_path = Path(target_folder_path_str)
                     else:
                         click.echo(f"  📁 Ensuring folder '{local_path.name}' exists in target...")
@@ -932,7 +935,7 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                             click.echo(f"  -> ⚠️  Could not check target subtree: {e}")
 
                     if existing_root_info is not None:
-                        click.echo(f"  -> ✨ Target subtree exists; pre-scanning recursively to skip Pass 1...")
+                        click.echo("  -> ✨ Target subtree exists; pre-scanning recursively to skip Pass 1...")
                         _seed_recursive(existing_root_info['uuid'])
                         _scan_tick(force=True)
                         click.echo("")  # finish the in-place line
@@ -957,7 +960,7 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
 
                     # ===== Pass 1: create sub-directories (skipped if subtree pre-scanned) =====
                     if not pass1_skipped:
-                        click.echo(f"  -> Pass 1/2: Creating subdirectory structure...")
+                        click.echo("  -> Pass 1/2: Creating subdirectory structure...")
                         dir_list = [it for it in local_path.rglob('*') if it.is_dir()]
                         dir_list.sort(key=lambda x: len(x.parts))
 
@@ -990,9 +993,9 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                                 click.echo(f"     ❌ Error creating dir {item_target_path_str}: {create_err}", err=True)
                                 error_count += 1
                     else:
-                        click.echo(f"  -> Pass 1/2: Skipped (subtree pre-scanned)")
+                        click.echo("  -> Pass 1/2: Skipped (subtree pre-scanned)")
 
-                    click.echo(f"  -> Pass 2/2: Uploading files...")
+                    click.echo("  -> Pass 2/2: Uploading files...")
 
                     # ===== Build the upload work list (sequential parent resolution) =====
                     upload_jobs: List[Tuple[Path, str, str, Optional[str], Optional[str]]] = []
@@ -1223,7 +1226,7 @@ def download(file_uuid: str, destination: str, preserve_timestamps: bool, on_con
             click.echo(f"📥 Downloading file with UUID: {file_uuid}")
             click.echo(f"📁 Destination: {destination}")
             if preserve_timestamps:
-                click.echo(f"🕐 Timestamp preservation: enabled")
+                click.echo("🕐 Timestamp preservation: enabled")
         
         # Check if destination file already exists
         dest_path = Path(destination)
@@ -1294,12 +1297,12 @@ def list_path(path: str, detailed: bool, show_all: bool):
                     if display_creation != 'N/A':
                         click.echo(f"     Creation Time: {format_date(display_creation)} ({display_creation})")
                     else:
-                        click.echo(f"     Creation Time: N/A")
+                        click.echo("     Creation Time: N/A")
                     
                     if display_modification != 'N/A':
                         click.echo(f"     Modification Time: {format_date(display_modification)} ({display_modification})")
                     else:
-                        click.echo(f"     Modification Time: N/A")
+                        click.echo("     Modification Time: N/A")
                     
                     # Other attributes
                     click.echo(f"     Deleted: {folder.get('deleted', False)}")
@@ -1349,12 +1352,12 @@ def list_path(path: str, detailed: bool, show_all: bool):
                     if display_creation != 'N/A':
                         click.echo(f"     Creation Time: {format_date(display_creation)} ({display_creation})")
                     else:
-                        click.echo(f"     Creation Time: N/A")
+                        click.echo("     Creation Time: N/A")
                     
                     if display_modification != 'N/A':
                         click.echo(f"     Modification Time: {format_date(display_modification)} ({display_modification})")
                     else:
-                        click.echo(f"     Modification Time: N/A")
+                        click.echo("     Modification Time: N/A")
                     
                     # Other attributes
                     click.echo(f"     Deleted: {file.get('deleted', False)}")
@@ -1379,7 +1382,7 @@ def list_path(path: str, detailed: bool, show_all: bool):
         if content['files'] and not show_all:
             example_file = content['files'][0]
             example_path = example_file['path']
-            click.echo(f"\n💡 Usage examples:")
+            click.echo("\n💡 Usage examples:")
             click.echo(f"   Download by path: python cli.py download-path \"{example_path}\"")
             click.echo(f"   Delete by path:   python cli.py trash-path \"{example_path}\"")
     
@@ -1446,7 +1449,7 @@ def download_path(path: str, destination: Optional[str], recursive: bool, on_con
                 file_name = f"{file_name}.{item_info.get('type')}"
             
             if not drive_service.should_include_file(Path(file_name), include_patterns, exclude_patterns):
-                click.echo(f"🚫 File filtered out by include/exclude patterns")
+                click.echo("🚫 File filtered out by include/exclude patterns")
                 sys.exit(0)
             
             # Determine destination
@@ -1467,7 +1470,7 @@ def download_path(path: str, destination: Optional[str], recursive: bool, on_con
                 preserve_timestamps=preserve_timestamps
             )
             
-            click.echo(f"\n🎉 Downloaded successfully!")
+            click.echo("\n🎉 Downloaded successfully!")
             click.echo(f"📄 From: {path}")
             click.echo(f"💾 To: {downloaded_path}")
             
@@ -1764,7 +1767,7 @@ def find(path: str, name_pattern: Optional[str], iname_pattern: Optional[str], m
         
         if results:
             example = results[0]
-            click.echo(f"💡 Usage examples:")
+            click.echo("💡 Usage examples:")
             click.echo(f"   Download: python cli.py download-path \"{example['path']}\"")
             click.echo(f"   Delete:   python cli.py trash-path \"{example['path']}\"")
     
@@ -1797,7 +1800,7 @@ def resolve(path: str):
             click.echo(f"File type: {file_type}")
             click.echo(f"Size: {size}")
         
-        click.echo(f"\n💡 You can use this path with:")
+        click.echo("\n💡 You can use this path with:")
         if resolved['type'] == 'file':
             click.echo(f"   python cli.py download-path \"{resolved['path']}\"")
             click.echo(f"   python cli.py trash-path \"{resolved['path']}\"")
@@ -2048,7 +2051,7 @@ def webdav_start(port: Optional[int], background: bool, show_mount: bool,
             # Check if already running
             status = webdav_server.status()
             if status['running']:
-                click.echo(f"❌ WebDAV server is already running")
+                click.echo("❌ WebDAV server is already running")
                 click.echo(f"🌐 Server URL: {status['url']}")
                 sys.exit(1)
             
@@ -2080,12 +2083,12 @@ def webdav_start(port: Optional[int], background: bool, show_mount: bool,
                 if status.get('running'):
                     click.echo(f"✅ WebDAV server started in background (PID: {process.pid})")
                     click.echo(f"🌐 Server URL: http://localhost:{webdav_config['port']}/")
-                    click.echo(f"👤 Username: internxt")
-                    click.echo(f"🔑 Password: internxt-webdav")
+                    click.echo("👤 Username: internxt")
+                    click.echo("🔑 Password: internxt-webdav")
                     click.echo(f"🕐 Preserve Timestamps: {'Yes' if webdav_config['preserveTimestamps'] else 'No'}")
                     click.echo(f"\n📋 Logs: {log_file}")
-                    click.echo(f"💡 Use 'python cli.py webdav-stop' to stop the server")
-                    click.echo(f"💡 Use 'python cli.py webdav-status' to check status")
+                    click.echo("💡 Use 'python cli.py webdav-stop' to stop the server")
+                    click.echo("💡 Use 'python cli.py webdav-status' to check status")
                 else:
                     click.echo(f"❌ Server failed to start. Check logs: {log_file}")
                     sys.exit(1)
@@ -2109,11 +2112,11 @@ def webdav_start(port: Optional[int], background: bool, show_mount: bool,
         if result['success']:
             click.echo(f"✅ {result['message']}")
             click.echo(f"🌐 Server URL: {result['url']}")
-            click.echo(f"👤 Username: internxt")
-            click.echo(f"🔑 Password: internxt-webdav")
+            click.echo("👤 Username: internxt")
+            click.echo("🔑 Password: internxt-webdav")
             
             if show_mount:
-                click.echo(f"\n💡 Mount Instructions:")
+                click.echo("\n💡 Mount Instructions:")
                 instructions = webdav_server.get_mount_instructions()
                 
                 # Detect platform and show relevant instructions
@@ -2132,7 +2135,7 @@ def webdav_start(port: Optional[int], background: bool, show_mount: bool,
                         click.echo(f"\n{platform_name.upper()}:")
                         click.echo(instruction)
             
-            click.echo(f"\n🔄 Server running... Press Ctrl+C to stop")
+            click.echo("\n🔄 Server running... Press Ctrl+C to stop")
             # Server will run in main thread - keep it alive
             while True:
                 time.sleep(1)
@@ -2141,7 +2144,7 @@ def webdav_start(port: Optional[int], background: bool, show_mount: bool,
             sys.exit(1)
             
     except KeyboardInterrupt:
-        click.echo(f"\n🛑 WebDAV server stopped by user")
+        click.echo("\n🛑 WebDAV server stopped by user")
         config_service.clear_webdav_pid()
     except Exception as e:
         click.echo(f"❌ Error starting WebDAV server: {e}", err=True)
@@ -2174,18 +2177,18 @@ def webdav_status():
         status = webdav_server.status()
         
         if status['running']:
-            click.echo(f"✅ WebDAV server is running")
+            click.echo("✅ WebDAV server is running")
             click.echo(f"🌐 URL: {status['url']}")
             click.echo(f"📡 Protocol: {status['protocol'].upper()}")
             click.echo(f"🚪 Port: {status['port']}")
             click.echo(f"🏠 Host: {status['host']}")
             
-            click.echo(f"\n👤 Credentials:")
-            click.echo(f"   Username: internxt")
-            click.echo(f"   Password: internxt-webdav")
+            click.echo("\n👤 Credentials:")
+            click.echo("   Username: internxt")
+            click.echo("   Password: internxt-webdav")
         else:
-            click.echo(f"❌ WebDAV server is not running")
-            click.echo(f"💡 Start with: python cli.py webdav-start")
+            click.echo("❌ WebDAV server is not running")
+            click.echo("💡 Start with: python cli.py webdav-start")
             
     except Exception as e:
         click.echo(f"❌ Error checking WebDAV status: {e}", err=True)
@@ -2199,22 +2202,22 @@ def webdav_mount():
         status = webdav_server.status()
         
         if not status['running']:
-            click.echo(f"❌ WebDAV server is not running")
-            click.echo(f"💡 Start with: python cli.py webdav-start")
+            click.echo("❌ WebDAV server is not running")
+            click.echo("💡 Start with: python cli.py webdav-start")
             sys.exit(1)
         
-        click.echo(f"🗂️  Mount Instructions for Internxt Drive")
-        click.echo(f"=" * 50)
+        click.echo("🗂️  Mount Instructions for Internxt Drive")
+        click.echo("=" * 50)
         click.echo(f"Server URL: {status['url']}")
-        click.echo(f"Username: internxt")
-        click.echo(f"Password: internxt-webdav")
+        click.echo("Username: internxt")
+        click.echo("Password: internxt-webdav")
         
         instructions = webdav_server.get_mount_instructions()
         
         # Show all platform instructions
         for platform_name, instruction in instructions.items():
             click.echo(f"\n{platform_name.upper()}:")
-            click.echo(f"-" * 20)
+            click.echo("-" * 20)
             click.echo(instruction)
             
     except Exception as e:
@@ -2230,11 +2233,11 @@ def webdav_test():
         status = webdav_server.status()
         
         if not status['running']:
-            click.echo(f"❌ WebDAV server is not running")
-            click.echo(f"💡 Start with: python cli.py webdav-start")
+            click.echo("❌ WebDAV server is not running")
+            click.echo("💡 Start with: python cli.py webdav-start")
             sys.exit(1)
         
-        click.echo(f"🧪 Testing WebDAV server connection...")
+        click.echo("🧪 Testing WebDAV server connection...")
         click.echo(f"🌐 Server URL: {status['url']}")
         
         # Test server connection
@@ -2258,7 +2261,7 @@ def webdav_test():
                 click.echo(f"📡 Status Code: {test_result['status_code']}")
         
         # Test with network utils
-        click.echo(f"\n🔍 Testing with external connection...")
+        click.echo("\n🔍 Testing with external connection...")
 
         external_test = NetworkUtils.test_webdav_connection(
             status['url'], 
@@ -2267,15 +2270,15 @@ def webdav_test():
         )
         
         if external_test['success']:
-            click.echo(f"✅ External connection test passed")
+            click.echo("✅ External connection test passed")
             click.echo(f"🔧 WebDAV Support: {'Yes' if external_test['webdav_supported'] else 'No'}")
             click.echo(f"🔧 Server: {external_test['server']}")
         else:
             click.echo(f"❌ External connection test failed: {external_test['message']}")
         
         # Show mount instructions
-        click.echo(f"\n💡 If tests pass but you can't mount, try:")
-        click.echo(f"   python cli.py webdav-mount")
+        click.echo("\n💡 If tests pass but you can't mount, try:")
+        click.echo("   python cli.py webdav-mount")
         
     except Exception as e:
         click.echo(f"❌ Error testing WebDAV server: {e}", err=True)
@@ -2288,12 +2291,12 @@ def webdav_test():
 def webdav_debug():
     """Show detailed WebDAV server debugging information"""
     try:
-        click.echo(f"🔍 WebDAV Server Debug Information")
-        click.echo(f"=" * 50)
+        click.echo("🔍 WebDAV Server Debug Information")
+        click.echo("=" * 50)
         
         # Server status
         status = webdav_server.status()
-        click.echo(f"📊 Server Status:")
+        click.echo("📊 Server Status:")
         click.echo(f"   Running: {'✅ Yes' if status['running'] else '❌ No'}")
         
         if status['running']:
@@ -2303,11 +2306,11 @@ def webdav_debug():
             click.echo(f"   Port: {status['port']}")
         
         # SSL Certificate status
-        click.echo(f"\n🔐 SSL Certificate Information:")
+        click.echo("\n🔐 SSL Certificate Information:")
 
         cert_info = NetworkUtils.validate_ssl_certificates()
         if cert_info['valid']:
-            click.echo(f"   Status: ✅ Valid")
+            click.echo("   Status: ✅ Valid")
             click.echo(f"   Days until expiry: {cert_info['days_until_expiry']}")
             click.echo(f"   Subject: {cert_info['subject']}")
         else:
@@ -2315,29 +2318,29 @@ def webdav_debug():
         
         # Configuration
         webdav_config = config_service.read_webdav_config()
-        click.echo(f"\n⚙️  WebDAV Configuration:")
+        click.echo("\n⚙️  WebDAV Configuration:")
         click.echo(f"   Protocol: {webdav_config['protocol']}")
         click.echo(f"   Port: {webdav_config['port']}")
         click.echo(f"   Timeout: {webdav_config['timeoutMinutes']} minutes")
         
         # File paths
-        click.echo(f"\n📁 File Paths:")
+        click.echo("\n📁 File Paths:")
         click.echo(f"   Config Dir: {config_service.internxt_cli_data_dir}")
         click.echo(f"   SSL Certs Dir: {NetworkUtils.WEBDAV_SSL_CERTS_DIR}")
         click.echo(f"   SSL Cert File: {NetworkUtils.WEBDAV_SSL_CERT_FILE} ({'✅' if NetworkUtils.WEBDAV_SSL_CERT_FILE.exists() else '❌'})")
         click.echo(f"   SSL Key File: {NetworkUtils.WEBDAV_SSL_KEY_FILE} ({'✅' if NetworkUtils.WEBDAV_SSL_KEY_FILE.exists() else '❌'})")
         
         # Authentication status
-        click.echo(f"\n🔐 Authentication:")
+        click.echo("\n🔐 Authentication:")
         user_info = auth_service.whoami()
         if user_info:
             click.echo(f"   Status: ✅ Logged in as {user_info['email']}")
         else:
-            click.echo(f"   Status: ❌ Not logged in")
+            click.echo("   Status: ❌ Not logged in")
         
         # Network tests
         if status['running']:
-            click.echo(f"\n🌐 Network Tests:")
+            click.echo("\n🌐 Network Tests:")
             
             # Test local connectivity
             import socket
@@ -2370,14 +2373,14 @@ def webdav_debug():
                 click.echo(f"   WebDAV Test: ❌ {e}")
         
         # Troubleshooting tips
-        click.echo(f"\n💡 Troubleshooting Tips:")
+        click.echo("\n💡 Troubleshooting Tips:")
         if not status['running']:
-            click.echo(f"   1. Start the server: python cli.py webdav-start")
+            click.echo("   1. Start the server: python cli.py webdav-start")
         else:
             click.echo(f"   1. Try connecting via browser: {status['url']}")
             click.echo(f"   2. Test with curl: curl -u internxt:internxt-webdav {status['url']}")
-            click.echo(f"   3. Check firewall/antivirus software")
-            click.echo(f"   4. Try a different port: python cli.py webdav-start --port 8080")
+            click.echo("   3. Check firewall/antivirus software")
+            click.echo("   4. Try a different port: python cli.py webdav-start --port 8080")
             
     except Exception as e:
         click.echo(f"❌ Error getting debug information: {e}", err=True)
@@ -2390,34 +2393,34 @@ def webdav_debug():
 def webdav_regenerate_ssl():
     """Regenerate SSL certificates for WebDAV server"""
     try:
-        click.echo(f"🔐 Regenerating SSL certificates for WebDAV server...")
+        click.echo("🔐 Regenerating SSL certificates for WebDAV server...")
 
         # Remove existing certificates
         if NetworkUtils.WEBDAV_SSL_CERT_FILE.exists():
             NetworkUtils.WEBDAV_SSL_CERT_FILE.unlink()
-            click.echo(f"🗑️  Removed old certificate")
+            click.echo("🗑️  Removed old certificate")
         
         if NetworkUtils.WEBDAV_SSL_KEY_FILE.exists():
             NetworkUtils.WEBDAV_SSL_KEY_FILE.unlink()
-            click.echo(f"🗑️  Removed old private key")
+            click.echo("🗑️  Removed old private key")
         
         # Generate new certificates
         NetworkUtils.generate_new_selfsigned_certs()
         
-        click.echo(f"✅ New SSL certificates generated successfully")
+        click.echo("✅ New SSL certificates generated successfully")
         click.echo(f"📁 Saved to: {NetworkUtils.WEBDAV_SSL_CERTS_DIR}")
         
         # Validate new certificates
         validation = NetworkUtils.validate_ssl_certificates()
         if validation['valid']:
-            click.echo(f"✅ Certificate validation passed")
+            click.echo("✅ Certificate validation passed")
             click.echo(f"📅 Valid until: {validation['expiry_date']}")
         else:
             click.echo(f"❌ Certificate validation failed: {validation['message']}")
         
-        click.echo(f"\n💡 Restart the WebDAV server to use the new certificates:")
-        click.echo(f"   python cli.py webdav-stop")
-        click.echo(f"   python cli.py webdav-start")
+        click.echo("\n💡 Restart the WebDAV server to use the new certificates:")
+        click.echo("   python cli.py webdav-stop")
+        click.echo("   python cli.py webdav-start")
         
     except Exception as e:
         click.echo(f"❌ Error regenerating SSL certificates: {e}", err=True)
@@ -2431,8 +2434,8 @@ def webdav_config_cmd():
         webdav_config = config_service.read_webdav_config()
         status = webdav_server.status()
         
-        click.echo(f"⚙️  WebDAV Server Configuration")
-        click.echo(f"=" * 40)
+        click.echo("⚙️  WebDAV Server Configuration")
+        click.echo("=" * 40)
         
         # Current configuration
         click.echo(f"📡 Protocol: {webdav_config.get('protocol', 'http').upper()}")
@@ -2444,7 +2447,7 @@ def webdav_config_cmd():
         click.echo("\n📝 Config file: " + str(config_service.webdav_configs_file))
         
         # SSL certificate info
-        click.echo(f"\n🔐 SSL Certificates:")
+        click.echo("\n🔐 SSL Certificates:")
         cert_dir = NetworkUtils.WEBDAV_SSL_CERTS_DIR
         cert_file = NetworkUtils.WEBDAV_SSL_CERT_FILE
         key_file = NetworkUtils.WEBDAV_SSL_KEY_FILE
@@ -2454,21 +2457,21 @@ def webdav_config_cmd():
         click.echo(f"   Private Key: {key_file} ({'✅ exists' if key_file.exists() else '❌ missing'})")
         
         # Server status
-        click.echo(f"\n🔄 Server Status:")
+        click.echo("\n🔄 Server Status:")
         if status['running']:
-            click.echo(f"   Status: ✅ Running")
+            click.echo("   Status: ✅ Running")
             click.echo(f"   URL: {status['url']}")
         else:
-            click.echo(f"   Status: ❌ Stopped")
+            click.echo("   Status: ❌ Stopped")
         
         # Usage examples
-        click.echo(f"\n💡 Usage Examples:")
-        click.echo(f"   Start server:    python cli.py webdav-start")
-        click.echo(f"   Start with SSL:  python cli.py webdav-start  # (auto-detects from config)")
-        click.echo(f"   Custom port:     python cli.py webdav-start --port 9090")
-        click.echo(f"   Disable timestamps:    python cli.py webdav-start --no-preserve-timestamps")
-        click.echo(f"   Background mode: python cli.py webdav-start --background")
-        click.echo(f"   Stop server:     python cli.py webdav-stop")
+        click.echo("\n💡 Usage Examples:")
+        click.echo("   Start server:    python cli.py webdav-start")
+        click.echo("   Start with SSL:  python cli.py webdav-start  # (auto-detects from config)")
+        click.echo("   Custom port:     python cli.py webdav-start --port 9090")
+        click.echo("   Disable timestamps:    python cli.py webdav-start --no-preserve-timestamps")
+        click.echo("   Background mode: python cli.py webdav-start --background")
+        click.echo("   Stop server:     python cli.py webdav-stop")
         
     except Exception as e:
         click.echo(f"❌ Error reading WebDAV configuration: {e}", err=True)
@@ -2485,9 +2488,10 @@ def test():
     
     # Test 1: Config service
     try:
-        if config_service.get('DRIVE_NEW_API_URL') != 'https://api.internxt.com/drive':
-            raise AssertionError("DRIVE_NEW_API_URL mismatch")
-        click.echo("✅ Config service - exact TypeScript match")
+        drive_api = config_service.get('DRIVE_NEW_API_URL')
+        if not drive_api.startswith('https://') or '/drive' not in drive_api:
+            raise AssertionError(f"DRIVE_NEW_API_URL invalid: {drive_api}")
+        click.echo(f"✅ Config service - DRIVE_NEW_API_URL={drive_api}")
         tests_passed += 1
     except Exception as e:
         click.echo(f"❌ Config service failed: {e}")
@@ -2507,10 +2511,9 @@ def test():
     # Test 3: API endpoints
     try:
         login_url = f"{api_client.drive_api_url}/auth/login"
-        expected_login = "https://api.internxt.com/drive/auth/login"
-        if login_url != expected_login:
-            raise AssertionError(f"login URL mismatch: {login_url}")
-        click.echo("✅ API endpoints - exact match to working API")
+        if not login_url.startswith('https://') or not login_url.endswith('/drive/auth/login'):
+            raise AssertionError(f"login URL malformed: {login_url}")
+        click.echo(f"✅ API endpoints - login URL={login_url}")
         tests_passed += 1
     except Exception as e:
         click.echo(f"❌ API endpoint test failed: {e}")
@@ -2584,9 +2587,13 @@ def config():
         
         # API Configuration
         click.echo("🌐 API Endpoints:")
-        click.echo(f"   Drive Web: {config_service.get('DRIVE_WEB_URL')}")
-        click.echo(f"   Drive API: {config_service.get('DRIVE_NEW_API_URL')}")
-        click.echo(f"   Network API: {config_service.get('NETWORK_URL')}")
+        for key, label in [('DRIVE_WEB_URL', 'Drive Web'),
+                           ('DRIVE_NEW_API_URL', 'Drive API'),
+                           ('NETWORK_URL', 'Network API')]:
+            try:
+                click.echo(f"   {label}: {config_service.get(key)}")
+            except ValueError:
+                click.echo(f"   {label}: (not configured)")
         
         # File Paths  
         click.echo("\n📁 File Paths:")

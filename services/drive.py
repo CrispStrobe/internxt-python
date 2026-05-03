@@ -233,7 +233,7 @@ class DriveService:
             'path': '/' + '/'.join(resolved_path_parts)
         }
 
-    def download_file_by_path(self, file_path: str, destination_path_str: str = None):
+    def download_file_by_path(self, file_path: str, destination_path_str: Optional[str] = None):
         """Download file by path instead of UUID"""
         print(f"🔍 Resolving path: {file_path}")
         
@@ -392,19 +392,19 @@ class DriveService:
         """Permanently delete file"""
         try:
             self._clear_parent_cache_for_item(file_uuid, 'file')
-            response = self.api.delete_file(file_uuid)
+            self.api.delete_file(file_uuid)
             return {'success': True, 'message': 'File permanently deleted successfully'}
         except Exception as e:
-            raise Exception(f"Failed to permanently delete file: {e}")
+            raise Exception(f"Failed to permanently delete file: {e}") from e
 
     def delete_permanently_folder(self, folder_uuid: str) -> Dict[str, Any]:
         """Permanently delete folder"""
         try:
             self._clear_parent_cache_for_item(folder_uuid, 'folder')
-            response = self.api.delete_folder(folder_uuid)
+            self.api.delete_folder(folder_uuid)
             return {'success': True, 'message': 'Folder permanently deleted successfully'}
         except Exception as e:
-            raise Exception(f"Failed to permanently delete folder: {e}")
+            raise Exception(f"Failed to permanently delete folder: {e}") from e
 
     def delete_permanently_by_path(self, path: str) -> Dict[str, Any]:
         """Permanently delete file or folder by path"""
@@ -476,11 +476,11 @@ class DriveService:
             # Try as file first
             try:
                 return self.move_file(item_uuid, destination_folder_uuid)
-            except:
+            except Exception:
                 # If file move fails, try as folder
                 return self.move_folder(item_uuid, destination_folder_uuid)
         except Exception as e:
-            raise Exception(f"Failed to move item {item_uuid}: {e}")
+            raise Exception(f"Failed to move item {item_uuid}: {e}") from e
 
     def rename_item(self, item_uuid: str, new_name: str) -> Dict[str, Any]:
         """Rename file or folder (WebDAV required)"""
@@ -488,11 +488,11 @@ class DriveService:
             # Try as file first
             try:
                 return self.rename_file(item_uuid, new_name)
-            except:
+            except Exception:
                 # If file rename fails, try as folder
                 return self.rename_folder(item_uuid, new_name)
         except Exception as e:
-            raise Exception(f"Failed to rename item {item_uuid}: {e}")
+            raise Exception(f"Failed to rename item {item_uuid}: {e}") from e
 
     def trash_item(self, item_uuid: str) -> Dict[str, Any]:
         """Move file or folder to trash (WebDAV required)"""
@@ -500,10 +500,10 @@ class DriveService:
             # Use the corrected API trash methods
             try:
                 return self.api.trash_file(item_uuid)
-            except:
+            except Exception:
                 return self.api.trash_folder(item_uuid)
         except Exception as e:
-            raise Exception(f"Failed to trash item {item_uuid}: {e}")
+            raise Exception(f"Failed to trash item {item_uuid}: {e}") from e
         
     def upload_with_safety_pattern(self, local_path: Path, remote_folder_uuid: str, filename: str):
         """
@@ -553,10 +553,8 @@ class DriveService:
         try:
             # Get current file metadata
             current_metadata = self.api.get_file_metadata(file_uuid)
-            folder_uuid = current_metadata.get('folderUuid', '')
             plain_name = current_metadata.get('plainName', '')
-            file_type = current_metadata.get('type', '')
-            
+
             # Upload new content and get new file ID
             file_path = Path(local_path)
             file_size = file_path.stat().st_size
@@ -664,7 +662,7 @@ class DriveService:
                 self.folder_content_cache.pop(target_uuid, None)
                 print(f"🧹 TRACE: Cleared cache for target folder: {target_uuid}")
             
-            print(f"✅ TRACE: Move successful!")
+            print("✅ TRACE: Move successful!")
             return result
 
         except Exception as e:
@@ -693,7 +691,7 @@ class DriveService:
                 plain_name = metadata.get('plainName', '')
                 file_type = metadata.get('type', '')
                 
-                print(f"     📋 Copying with timestamp preservation:")
+                print("     📋 Copying with timestamp preservation:")
                 if creation_time:
                     print(f"        Original creation: {creation_time}")
                 if modification_time:
@@ -720,11 +718,11 @@ class DriveService:
                 # Clean up temp file
                 try:
                     os.unlink(temp_path)
-                except:
+                except OSError:
                     pass
-                    
+
         except Exception as e:
-            raise Exception(f"Copy failed: {e}")
+            raise Exception(f"Copy failed: {e}") from e
         
     def create_upload_checkpoint(self, file_path: Path, target_uuid: str) -> str:
         """
@@ -733,10 +731,9 @@ class DriveService:
         """
         checkpoint_dir = self.config.internxt_cli_data_dir / 'upload_checkpoints'
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        
-        import hashlib
-        # Create unique checkpoint ID based on file path and target
-        checkpoint_id = hashlib.md5(f"{file_path}{target_uuid}".encode()).hexdigest()
+
+        # Non-cryptographic ID for checkpoint file naming.
+        checkpoint_id = hashlib.sha256(f"{file_path}{target_uuid}".encode()).hexdigest()[:32]
         checkpoint_file = checkpoint_dir / f"{checkpoint_id}.json"
         
         checkpoint_data = {
@@ -810,12 +807,12 @@ class DriveService:
         
         # Warn for very large files
         if file_size > 500 * 1024 * 1024:  # > 500MB
-            print(f"     ⚠️  Large file detected - encryption may take several minutes")
-            print(f"     💡 Please be patient, progress will be shown...")
+            print("     ⚠️  Large file detected - encryption may take several minutes")
+            print("     💡 Please be patient, progress will be shown...")
         
         # Log timestamp preservation attempt
         if creation_time or modification_time:
-            print(f"     🕐 Attempting to preserve timestamps:")
+            print("     🕐 Attempting to preserve timestamps:")
             if creation_time:
                 print(f"        Creation: {creation_time}")
             if modification_time:
@@ -833,7 +830,7 @@ class DriveService:
         mem_held = mem_need
 
         try:
-            print(f"     📖 Reading file from disk...")
+            print("     📖 Reading file from disk...")
             start_read = time.time()
             try:
                 with open(file_path, 'rb') as f:
@@ -846,7 +843,7 @@ class DriveService:
 
             # Step 1: Encryption
             print(f"\n     🔐 Step 1/5: Encrypting {self._format_size(len(plaintext))}...")
-            print(f"        This may take a few minutes for large files...")
+            print("        This may take a few minutes for large files...")
             start_encrypt = time.time()
 
             encrypted_data, file_index_hex = self.crypto.encrypt_stream_internxt_protocol(
@@ -860,8 +857,8 @@ class DriveService:
             self._mem_release(file_size)
             mem_held = file_size
 
-            print(f"     ✅ Encryption complete!")
-            print(f"        Time: {encrypt_time:.1f}s ({self._format_size(plaintext_len/encrypt_time)}/s)")
+            print("     ✅ Encryption complete!")
+            print(f"        Time: {encrypt_time:.1f}s ({self._format_size(int(plaintext_len/encrypt_time))}/s)")
             print(f"        Encrypted size: {self._format_size(len(encrypted_data))}")
             print(f"        File index: {file_index_hex[:16]}...")
         except BaseException:
@@ -876,7 +873,7 @@ class DriveService:
             for attempt in range(max_retries):
                 try:
                     # Step 2: Request upload URL
-                    print(f"\n     🚀 Step 2/5: Requesting upload URL from server...")
+                    print("\n     🚀 Step 2/5: Requesting upload URL from server...")
                     start_init = time.time()
 
                     start_response = self.api.start_upload(bucket_id, len(encrypted_data), auth=network_auth)
@@ -892,18 +889,18 @@ class DriveService:
                     # Step 3: Upload encrypted data
                     print(f"\n     ☁️  Step 3/5: Uploading {self._format_size(len(encrypted_data))} to network...")
                     print(f"        Timeout: {timeout_seconds}s")
-                    print(f"        This is the longest step - please be patient...")
+                    print("        This is the longest step - please be patient...")
 
                     start_upload = time.time()
                     self._upload_chunk_with_progress(upload_url, encrypted_data, timeout_seconds)
                     upload_time = time.time() - start_upload
 
                     upload_speed = len(encrypted_data) / upload_time if upload_time > 0 else 0
-                    print(f"     ✅ Upload complete!")
-                    print(f"        Time: {upload_time:.1f}s ({self._format_size(upload_speed)}/s)")
+                    print("     ✅ Upload complete!")
+                    print(f"        Time: {upload_time:.1f}s ({self._format_size(int(upload_speed))}/s)")
 
                     # Step 4: Finalize upload
-                    print(f"\n     ✅ Step 4/5: Finalizing upload on server...")
+                    print("\n     ✅ Step 4/5: Finalizing upload on server...")
                     start_finalize = time.time()
 
                     encrypted_hash = hashlib.sha256(encrypted_data).hexdigest()
@@ -921,7 +918,7 @@ class DriveService:
                     print(f"        Network file ID: {network_file_id}")
 
                     # Step 5: Create file entry
-                    print(f"\n     📋 Step 5/5: Creating file entry in your Drive...")
+                    print("\n     📋 Step 5/5: Creating file entry in your Drive...")
                     start_entry = time.time()
 
                     file_entry_payload = {
@@ -968,9 +965,9 @@ class DriveService:
                             print(f"     ⚠️  Modification timestamp NOT set (API returned: {returned_modification})")
 
                     total_time = time.time() - start_read
-                    print(f"\n     🎉 Upload complete!")
+                    print("\n     🎉 Upload complete!")
                     print(f"        Total time: {total_time:.1f}s ({total_time/60:.1f} minutes)")
-                    print(f"        Average speed: {self._format_size(file_size/total_time)}/s")
+                    print(f"        Average speed: {self._format_size(int(file_size/total_time))}/s")
 
                     return created_file
 
@@ -999,8 +996,6 @@ class DriveService:
         
         # For large uploads, show progress
         if len(chunk_data) > 10 * 1024 * 1024:  # > 10MB
-            from tqdm import tqdm
-            
             with tqdm(
                 total=len(chunk_data),
                 unit='B',
@@ -1058,7 +1053,7 @@ class DriveService:
         # --- END CACHE CHECK ---
 
         try:
-            credentials = self.auth.get_auth_details()
+            self.auth.get_auth_details()  # ensures session is initialized
             folders = self._get_all_folders(folder_uuid)
             files = self._get_all_files(folder_uuid)
             content = {'folders': folders, 'files': files}
@@ -1093,7 +1088,7 @@ class DriveService:
             # This is not fatal, just log it
             print(f"  -> ⚠️  Could not clear parent cache for {item_uuid} (parent: {parent_uuid}): {e}")
 
-    def list_folder(self, folder_uuid: str = None) -> Dict[str, List[Dict[str, Any]]]:
+    def list_folder(self, folder_uuid: Optional[str] = None) -> Dict[str, List[Dict[str, Any]]]:
         """List folder contents - backward compatibility"""
         credentials = self.auth.get_auth_details()
 
@@ -1196,8 +1191,9 @@ class DriveService:
             print(f" -> ❌ Search failed: {e}")
             return []
 
-    def create_folder(self, name: str, parent_folder_uuid: str = None,
-                      creation_time: str = None, modification_time: str = None) -> Dict[str, Any]:
+    def create_folder(self, name: str, parent_folder_uuid: Optional[str] = None,
+                      creation_time: Optional[str] = None,
+                      modification_time: Optional[str] = None) -> Dict[str, Any]:
         """Create new folder with optional timestamps AND update cache."""
         credentials = self.auth.get_auth_details()
 
@@ -1235,109 +1231,6 @@ class DriveService:
             # (and will include the new folder) on the next call.
 
         return new_folder_metadata
-
-    def create_folder_recursive(self, path: str,
-                              creation_time: Optional[str] = None,
-                              modification_time: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Ensures a folder path exists, creating intermediate folders if necessary.
-        Sets timestamps *only* if the folder is being created new.
-        Returns the metadata of the final folder.
-        """
-        credentials = self.auth.get_auth_details()
-        root_folder_uuid = credentials['user'].get('rootFolderId', '')
-
-        path = path.strip().strip('/')
-        if not path:
-             return {'uuid': root_folder_uuid, 'plainName': 'Root'}
-
-        parts = [part for part in path.split('/') if part] # Clean empty parts
-        current_parent_uuid = root_folder_uuid
-        current_path_so_far = "/"
-        final_folder_info = None
-
-        for i, part in enumerate(parts):
-            is_last_part = (i == len(parts) - 1)
-            found_folder = None
-            
-            try:
-                # 1. Check if the folder already exists (uses the cache)
-                content = self.get_folder_content(current_parent_uuid)
-                for folder in content['folders']:
-                    if folder.get('plainName') == part or folder.get('name') == part:
-                        found_folder = folder
-                        break
-
-                if not found_folder:
-                    # 2. FOLDER DOES NOT EXIST: Try to create it.
-                    try:
-                        print(f"  -> Creating new folder: {part} in {current_path_so_far}")
-                        new_folder = {}
-                        if is_last_part:
-                            print(f"  -> 🕐 Applying timestamps to new folder: {part}")
-                            new_folder = self.create_folder( # This clears the parent cache
-                                part, 
-                                current_parent_uuid,
-                                creation_time=creation_time,
-                                modification_time=modification_time
-                            )
-                        else:
-                            new_folder = self.api.create_folder({
-                                'plainName': part, 
-                                'parentFolderUuid': current_parent_uuid
-                            })
-                            # Manually clear the parent cache
-                            with self.cache_lock:
-                                self.folder_content_cache.pop(current_parent_uuid, None)
-                        
-                        found_folder = new_folder
-                    
-                    except Exception as e:
-                        if "already exists" in str(e):
-                            print(f"  -> ℹ️  Folder '{part}' already exists (consistency). Retrying list...")
-                            
-                            # It exists, but our cache or API is stale.
-                            # We must re-fetch the parent content until we find it.
-                            found_folder = None
-                            for _ in range(3): # Try 3 times
-                                time.sleep(0.5) # Wait 500ms for API to catch up
-                                
-                                # Manually clear cache again
-                                with self.cache_lock:
-                                    self.folder_content_cache.pop(current_parent_uuid, None)
-                                
-                                # Re-fetch content
-                                content = self.get_folder_content(current_parent_uuid)
-                                for folder in content['folders']:
-                                    if folder.get('plainName') == part or folder.get('name') == part:
-                                        found_folder = folder
-                                        break
-                                if found_folder:
-                                    print(f"  -> ✅ Found '{part}' on retry.")
-                                    break # We found it!
-                            
-                            if not found_folder:
-                                # If we still can't find it, something is wrong.
-                                raise Exception(f"Failed to create folder '{part}' and could not resolve it after 3 retries.")
-                        else:
-                            raise e # Re-raise other errors
-
-                # 3. By this point, 'found_folder' *must* have the folder info
-                current_parent_uuid = found_folder['uuid']
-                final_folder_info = found_folder
-                current_path_so_far = f"{current_path_so_far.rstrip('/')}/{part}"
-
-                # 4. Apply timestamps if it's the last part and *didn't* just get created
-                if is_last_part:
-                    if (creation_time or modification_time) and not new_folder:
-                        print(f"  -> ℹ️  Note: Folder '{part}' already exists. Cannot update timestamps (API limitation).")
-                    
-                    return final_folder_info
-
-            except Exception as e:
-                 raise Exception(f"Failed to resolve or create folder part '{part}' in '{current_path_so_far}': {e}")
-
-        return {'uuid': root_folder_uuid, 'plainName': 'Root'}
 
     def create_folder_recursive(self, path: str,
                               creation_time: Optional[str] = None,
@@ -1483,7 +1376,7 @@ class DriveService:
             'file_list': List[Path]
         }
         """
-        stats = {
+        stats: Dict[str, Any] = {
             'total_files': 0,
             'total_size': 0,
             'total_dirs': 0,
@@ -1521,10 +1414,9 @@ class DriveService:
         
         return stats
     
-    def should_include_file(self, file_path: Path, include_patterns: List[str], 
+    def should_include_file(self, file_path: Path, include_patterns: List[str],
                             exclude_patterns: List[str]) -> bool:
         """Check if a file should be included based on include/exclude patterns"""
-        import fnmatch
         file_name = file_path.name
         
         # If include patterns specified, file must match at least one
@@ -1595,31 +1487,31 @@ class DriveService:
         print(f"  -> Preparing upload: '{local_path.name}' ({self._format_size(file_size)}) to '{full_target_remote_path}'")
         
         if creation_time or modification_time:
-            print(f"  -> 🕐 With timestamp preservation")
+            print("  -> 🕐 With timestamp preservation")
 
         existing_item_info = None
         try:
             existing_item_info = self.resolve_path(full_target_remote_path)
             print(f"  -> Target exists: {full_target_remote_path} (Type: {existing_item_info['type']})")
         except FileNotFoundError:
-            print(f"  -> Target does not exist, proceeding with upload")
+            print("  -> Target does not exist, proceeding with upload")
             pass
         except Exception as e:
             print(f"  -> ⚠️  Error checking target existence: {e}")
 
         if existing_item_info:
             if on_conflict == 'skip':
-                print(f"  -> ⏭️  Skipping due to conflict policy (file exists)")
+                print("  -> ⏭️  Skipping due to conflict policy (file exists)")
                 return "skipped"
             elif on_conflict == 'overwrite':
                 if existing_item_info['type'] == 'folder':
                     print(f"  -> ❌ Cannot overwrite folder with a file: {full_target_remote_path}")
                     return "error"
                 else:
-                    print(f"  -> 🔄 Overwriting existing file...")
+                    print("  -> 🔄 Overwriting existing file...")
                     try:
                         self.delete_permanently_by_path(full_target_remote_path)
-                        print(f"  -> 🗑️  Deleted existing file for overwrite")
+                        print("  -> 🗑️  Deleted existing file for overwrite")
                     except Exception as del_err:
                         print(f"  -> ❌ Error deleting existing file for overwrite: {del_err}")
                         return "error"
@@ -1687,7 +1579,7 @@ class DriveService:
             print(f"     📄 File: {file_name}")
             print(f"     📊 Size: {self._format_size(file_size)}")
             if preserve_timestamps:
-                print(f"     🕐 Remote timestamps:")
+                print("     🕐 Remote timestamps:")
                 if creation_time:
                     print(f"        Creation: {creation_time}")
                 if modification_time:
@@ -1699,7 +1591,7 @@ class DriveService:
             links_response = self.api.get_download_links(bucket_id, network_file_id, auth=network_auth)
             download_url = links_response['shards'][0]['url']
             file_index_hex = links_response['index']
-            print(f"     🔗 Download URL acquired")
+            print("     🔗 Download URL acquired")
             pbar.update(1)
             
             pbar.set_description("☁️  Downloading encrypted data")
@@ -1721,7 +1613,7 @@ class DriveService:
             if destination_path.is_dir():
                 destination_path = destination_path / file_name
             
-            pbar.set_description(f"💾 Saving to disk")
+            pbar.set_description("💾 Saving to disk")
             with open(destination_path, 'wb') as f:
                 f.write(decrypted_data)
             print(f"     💾 Saved to: {destination_path}")
@@ -1730,10 +1622,9 @@ class DriveService:
         # Set timestamps if requested
         if preserve_timestamps and (creation_time or modification_time):
             try:
-                import os
                 from datetime import datetime
-                
-                stat_info = destination_path.stat()
+
+                destination_path.stat()
                 
                 # Parse timestamps
                 if modification_time:
@@ -1750,7 +1641,7 @@ class DriveService:
                 
                 # Note: Setting creation time is platform-specific and often not supported
                 if creation_time:
-                    print(f"     ℹ️  Note: Creation time cannot be set on most systems")
+                    print("     ℹ️  Note: Creation time cannot be set on most systems")
                     
             except Exception as e:
                 print(f"     ⚠️  Could not preserve timestamps: {e}")
@@ -1763,22 +1654,43 @@ class DriveService:
         if not size_bytes:
             return "0 B"
 
+        size: float = float(size_bytes)
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if size_bytes < 1024.0:
-                return f"{size_bytes:.1f} {unit}"
-            size_bytes /= 1024.0
+            if size < 1024.0:
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
 
-        return f"{size_bytes:.1f} PB"
+        return f"{size:.1f} PB"
 
     def get_file_metadata(self, file_uuid: str) -> Dict[str, Any]:
         """Get file metadata"""
-        credentials = self.auth.get_auth_details()
+        self.auth.get_auth_details()  # ensures session is initialized
         return self.api.get_file_metadata(file_uuid)
 
     def get_folder_metadata(self, folder_uuid: str) -> Dict[str, Any]:
         """Get folder metadata"""
-        credentials = self.auth.get_auth_details()
+        self.auth.get_auth_details()  # ensures session is initialized
         return self.api.get_folder_metadata(folder_uuid)
+
+    def set_folder_timestamps(self, folder_uuid: str,
+                              creation_time: Optional[str] = None,
+                              modification_time: Optional[str] = None) -> Dict[str, Any]:
+        """Update creation/modification timestamps on an existing folder.
+
+        Used by the WebDAV provider's PROPPATCH handler so file managers
+        (Finder, Explorer) can set folder timestamps on the remote.
+        """
+        if not creation_time and not modification_time:
+            raise ValueError("Must provide creation_time or modification_time")
+        payload: Dict[str, Any] = {}
+        if creation_time:
+            payload['creationTime'] = creation_time
+        if modification_time:
+            payload['modificationTime'] = modification_time
+        result = self.api.update_folder_metadata(folder_uuid, payload)
+        # Invalidate the parent-folder cache so subsequent listings see new times.
+        self._clear_parent_cache_for_item(folder_uuid, 'folder')
+        return result
 
 
 # Global instance

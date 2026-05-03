@@ -3,7 +3,6 @@
 internxt_cli/services/auth.py
 Authentication service for Internxt CLI
 """
-import base64
 import hashlib
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
@@ -82,9 +81,8 @@ class AuthService:
         hydrated = self.api.refresh_token(temp_token)
         
         user_data = hydrated['user']
-        
+
         # Compute Bridge credentials for Object Storage auth
-        import hashlib
         bridge_pass = hashlib.sha256(str(user_data['userId']).encode()).hexdigest()
         
         # Final construction including the decrypted mnemonic

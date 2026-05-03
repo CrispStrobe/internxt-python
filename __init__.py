@@ -1,3 +1,4 @@
+"""
 Internxt Python CLI
 A Python implementation of the Internxt CLI for encrypted cloud storage
 """

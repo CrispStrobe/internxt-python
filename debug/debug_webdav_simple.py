@@ -29,10 +29,10 @@ def test_webdav_simple(base_url="http://localhost:8080", username="internxt", pa
             print("   ℹ️  Server accessible")
             
     except requests.exceptions.ConnectRefused:
-        print(f"   ❌ Connection refused - is the server running?")
+        print("   ❌ Connection refused - is the server running?")
         return False
     except requests.exceptions.Timeout:
-        print(f"   ❌ Connection timeout")
+        print("   ❌ Connection timeout")
         return False
     except Exception as e:
         print(f"   ❌ Connection failed: {e}")
@@ -46,14 +46,14 @@ def test_webdav_simple(base_url="http://localhost:8080", username="internxt", pa
         if response.status_code in [200, 207]:
             print(f"   ✅ Authentication successful (Status: {response.status_code})")
         elif response.status_code == 401:
-            print(f"   ❌ Authentication failed - check credentials")
+            print("   ❌ Authentication failed - check credentials")
             return False
         else:
             print(f"   ⚠️  Unexpected status: {response.status_code}")
             print(f"       Response: {response.text[:200]}...")
             
     except requests.exceptions.Timeout:
-        print(f"   ❌ Authentication request timed out")
+        print("   ❌ Authentication request timed out")
         return False
     except Exception as e:
         print(f"   ❌ Authentication test failed: {e}")
@@ -65,7 +65,7 @@ def test_webdav_simple(base_url="http://localhost:8080", username="internxt", pa
         response = requests.options(base_url, auth=auth, timeout=10)
         
         if response.status_code in [200, 204]:
-            print(f"   ✅ OPTIONS request successful")
+            print("   ✅ OPTIONS request successful")
             
             # Check headers
             allow_header = response.headers.get('Allow', '')
@@ -115,14 +115,14 @@ def test_webdav_simple(base_url="http://localhost:8080", username="internxt", pa
         )
         
         if response.status_code == 207:
-            print(f"   ✅ PROPFIND successful")
+            print("   ✅ PROPFIND successful")
             print(f"   📋 Response length: {len(response.text)} characters")
             
             # Basic XML check
             if '<?xml' in response.text and ('multistatus' in response.text.lower()):
-                print(f"   ✅ Valid XML response")
+                print("   ✅ Valid XML response")
             else:
-                print(f"   ⚠️  Response may not be valid XML")
+                print("   ⚠️  Response may not be valid XML")
                 
         else:
             print(f"   ❌ PROPFIND failed (Status: {response.status_code})")
@@ -133,20 +133,20 @@ def test_webdav_simple(base_url="http://localhost:8080", username="internxt", pa
         print(f"   ❌ PROPFIND test failed: {e}")
         return False
     
-    print(f"\n🎉 All tests passed! WebDAV server is working correctly.")
+    print("\n🎉 All tests passed! WebDAV server is working correctly.")
     
     # Show connection info
-    print(f"\n💡 Connection Information:")
+    print("\n💡 Connection Information:")
     print(f"   Server URL: {base_url}")
     print(f"   Username: {username}")
     print(f"   Password: {password}")
     
-    print(f"\n🖥️  macOS Finder Instructions:")
-    print(f"   1. Press Cmd+K in Finder")
+    print("\n🖥️  macOS Finder Instructions:")
+    print("   1. Press Cmd+K in Finder")
     print(f"   2. Enter: {base_url}")
-    print(f"   3. Use credentials above")
+    print("   3. Use credentials above")
     
-    print(f"\n🧪 curl Test Commands:")
+    print("\n🧪 curl Test Commands:")
     print(f"   curl -u {username}:{password} {base_url}")
     print(f"   curl -u {username}:{password} -X OPTIONS {base_url}")
     
@@ -159,10 +159,10 @@ def wait_for_server(base_url="http://localhost:8080", max_wait=30):
     start_time = time.time()
     while time.time() - start_time < max_wait:
         try:
-            response = requests.get(base_url, timeout=2)
-            print(f"✅ Server is ready!")
+            requests.get(base_url, timeout=2)
+            print("✅ Server is ready!")
             return True
-        except:
+        except requests.RequestException:
             print(".", end="", flush=True)
             time.sleep(1)
     
@@ -197,12 +197,12 @@ if __name__ == "__main__":
     success = test_webdav_simple(base_url, username, password)
     
     if success:
-        print(f"\n✅ WebDAV server test completed successfully!")
+        print("\n✅ WebDAV server test completed successfully!")
         sys.exit(0)
     else:
-        print(f"\n❌ WebDAV server test failed!")
-        print(f"💡 Try these troubleshooting steps:")
-        print(f"   1. Restart the server: python cli.py webdav-stop && python cli.py webdav-start --port 8080")
-        print(f"   2. Check if another service is using the port")  
-        print(f"   3. Try a different port: python cli.py webdav-start --port 9000")
+        print("\n❌ WebDAV server test failed!")
+        print("💡 Try these troubleshooting steps:")
+        print("   1. Restart the server: python cli.py webdav-stop && python cli.py webdav-start --port 8080")
+        print("   2. Check if another service is using the port")  
+        print("   3. Try a different port: python cli.py webdav-start --port 9000")
         sys.exit(1)
