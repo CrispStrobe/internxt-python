@@ -294,12 +294,13 @@ pip install -r requirements-dev.txt
 
 ### Running Tests
 
-The project ships with a pytest suite covering crypto round-trips, path
-resolution, upload/download conflict handling, the WebDAV provider, and
-all major CLI commands.
+The project ships with a 557-test pytest suite at **90% line coverage**.
+It covers crypto round-trips, path resolution, upload/download conflict
+handling, the WebDAV provider, all major CLI commands, and a real
+encrypt → upload → "wire" → download → decrypt round-trip cycle.
 
 ```bash
-# Run the full test suite
+# Run the full test suite (~3 seconds)
 pytest
 
 # With coverage report
@@ -311,6 +312,23 @@ pytest tests/test_crypto.py -v
 # In-CLI smoke check (no test framework needed)
 python cli.py test
 ```
+
+Per-module coverage:
+
+| Module                          | Coverage |
+|---------------------------------|---------:|
+| `services/auth.py`              |    100% |
+| `services/crypto.py`            |    100% |
+| `utils/api.py`                  |     98% |
+| `services/webdav_provider.py`   |     91% |
+| `services/network_utils.py`     |     90% |
+| `services/drive.py`             |     89% |
+| `config/config.py`              |     85% |
+| `services/webdav_server.py`     |     83% |
+| **Total**                       |    **90%** |
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the full audit summary and the
+list of bugs found and fixed during the test build-out.
 
 ### Quality Gates
 
