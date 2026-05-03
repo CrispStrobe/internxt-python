@@ -23,3 +23,8 @@ env/
 # Editor
 .vscode/
 .idea/
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example

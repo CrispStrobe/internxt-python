@@ -5,3 +5,7 @@ pytest-cov>=4.1.0
 ruff>=0.1.0
 mypy>=1.5.0
 bandit>=1.7.0
+
+# Optional: load IXT_ACCOUNT/IXT_PWD from .env for the live smoke test
+# (tests fall back to a built-in parser if not installed)
+python-dotenv>=1.0.0

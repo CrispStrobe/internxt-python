@@ -1278,22 +1278,20 @@ class DriveService:
                     try:
                         print(f"  -> Creating new folder: {part} in {current_path_so_far}")
                         
-                        # We only pass timestamps if this is the *final* folder
+                        # Use self.create_folder for both intermediate and final
+                        # parts so the parent cache is invalidated/updated. Only
+                        # the final part gets timestamps applied.
                         if is_last_part:
                             print(f"  -> 🕐 Applying timestamps to new folder: {part}")
                             new_folder = self.create_folder(
-                                part, 
+                                part,
                                 current_parent_uuid,
                                 creation_time=creation_time,
-                                modification_time=modification_time
+                                modification_time=modification_time,
                             )
                         else:
-                            # Create intermediate folders *without* timestamps
-                            new_folder = self.api.create_folder({
-                                'plainName': part, 
-                                'parentFolderUuid': current_parent_uuid
-                            })
-                        
+                            new_folder = self.create_folder(part, current_parent_uuid)
+
                         current_parent_uuid = new_folder['uuid']
                         final_folder_info = new_folder
                     

@@ -175,16 +175,18 @@ def test_create_folder_recursive_existing_no_api_call():
 
 
 def test_create_folder_recursive_creates_missing_parts():
-    """Intermediate folders go through api.create_folder; final folder uses
-    drive_service.create_folder so timestamps can be applied."""
-    # Initially empty tree at every level.
+    """All parts (intermediate + final) go through drive_service.create_folder
+    so the parent cache is updated for each. Only the final part gets
+    timestamps applied.
+
+    Regression: prior implementation called api.create_folder directly for
+    intermediate parts, which bypassed the parent-cache update and made
+    subsequent resolve_path() calls fail with FileNotFoundError when reading
+    from a stale root cache. Caught by tests/test_live_smoke.py.
+    """
     tree = {'root-uuid': {'folders': [], 'files': []}}
 
-    def fake_create_intermediate(payload):
-        # Simulate the server returning a uuid for the new intermediate folder
-        return {'uuid': f"new-{payload['plainName']}", 'plainName': payload['plainName']}
-
-    def fake_create_final(name, parent_uuid, creation_time=None, modification_time=None):
+    def fake_create(name, parent_uuid, creation_time=None, modification_time=None):
         return {
             'uuid': f"new-{name}", 'plainName': name,
             'parentFolderUuid': parent_uuid,
@@ -193,28 +195,31 @@ def test_create_folder_recursive_creates_missing_parts():
 
     with _set_root(), \
          _stub_get_folder_content(tree), \
-         patch.object(drive_service.api, 'create_folder',
-                      side_effect=fake_create_intermediate) as mock_api_create, \
+         patch.object(drive_service.api, 'create_folder') as mock_api_create, \
          patch.object(drive_service, 'create_folder',
-                      side_effect=fake_create_final) as mock_create_final_top:
+                      side_effect=fake_create) as mock_create:
         out = drive_service.create_folder_recursive(
             '/A/B/C',
             creation_time='2026-01-01T00:00:00Z',
             modification_time='2026-01-02T00:00:00Z',
         )
 
-    # /A and /A/B are intermediate -> 2 api.create_folder calls
-    assert mock_api_create.call_count == 2
-    intermediate_names = [call.args[0]['plainName'] for call in mock_api_create.call_args_list]
-    assert intermediate_names == ['A', 'B']
+    # All 3 parts go through self.create_folder (which keeps the parent
+    # cache in sync). The raw api.create_folder is NOT called directly.
+    mock_api_create.assert_not_called()
+    assert mock_create.call_count == 3
+    names_in_order = [call.args[0] for call in mock_create.call_args_list]
+    assert names_in_order == ['A', 'B', 'C']
 
-    # /A/B/C is the final part -> 1 drive_service.create_folder call
-    # with timestamps preserved.
-    mock_create_final_top.assert_called_once()
-    args, kwargs = mock_create_final_top.call_args
-    assert args[0] == 'C'
-    assert kwargs.get('creation_time') == '2026-01-01T00:00:00Z'
-    assert kwargs.get('modification_time') == '2026-01-02T00:00:00Z'
+    # Only the LAST call (for 'C') gets timestamps; intermediates pass None.
+    intermediate_call = mock_create.call_args_list[0]
+    assert intermediate_call.kwargs.get('creation_time') is None
+    assert intermediate_call.kwargs.get('modification_time') is None
+
+    final_call = mock_create.call_args_list[-1]
+    assert final_call.args[0] == 'C'
+    assert final_call.kwargs.get('creation_time') == '2026-01-01T00:00:00Z'
+    assert final_call.kwargs.get('modification_time') == '2026-01-02T00:00:00Z'
 
     # Returned info points at the final folder
     assert out['uuid'] == 'new-C'

@@ -330,6 +330,24 @@ Per-module coverage:
 See [`CHANGELOG.md`](CHANGELOG.md) for the full audit summary and the
 list of bugs found and fixed during the test build-out.
 
+#### Live integration smoke (optional)
+
+`tests/test_live_smoke.py` runs an end-to-end cycle (login → create
+folder → upload → list → download → verify bytes → trash) against the
+real Internxt backend. Auto-skipped unless credentials are present.
+
+```bash
+# Put creds in a .env file (gitignored — never committed)
+echo 'IXT_ACCOUNT=you@example.com' > .env
+echo 'IXT_PWD=your-password' >> .env
+
+pytest tests/test_live_smoke.py -v -s
+```
+
+All operations happen inside a unique sentinel folder
+(`/__pytest_internxt_cli_smoke__/<run-uuid>/`) which is always trashed
+at teardown — your real files are never touched.
+
 ### Quality Gates
 
 The CI runs four gates on every push/PR:

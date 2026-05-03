@@ -30,7 +30,23 @@ End state: **0 ruff errors, 0 mypy errors, 0 Bandit medium+ findings,
    `import internxt_cli` raised `SyntaxError`.
    **Fixed:** added the missing triple-quote.
 
-3. **`services/webdav_provider.py:set_property` — every PROPPATCH crashed**
+3. **`services/drive.py:create_folder_recursive` — stale parent cache after intermediate folder creation** *(found by live integration test)*
+   When creating intermediate folders for a nested path like
+   `/A/B/C`, the function called `self.api.create_folder` directly,
+   which does **not** invalidate the parent folder's content cache. The
+   final folder went through `self.create_folder` (which does update the
+   cache), but by then the parent caches for `A` and `B` were stale.
+   Subsequent `resolve_path()` calls would walk the tree using the stale
+   root cache and fail with `FileNotFoundError`, even though the folder
+   chain definitely existed on the server. This was masked in unit
+   tests by stubbing `get_folder_content` directly. **Caught only when
+   the live smoke test (`tests/test_live_smoke.py`) ran the create →
+   resolve cycle against the real backend.**
+   **Fixed:** route all parts (intermediate + final) through
+   `self.create_folder` so every parent cache stays in sync; only the
+   final part receives timestamp arguments.
+
+4. **`services/webdav_provider.py:set_property` — every PROPPATCH crashed**
    This is the handler macOS Finder and Windows Explorer use to set
    creation/modification times on remote folders. Two broken pieces:
    - It imported `rfc_1123_to_timestamp` and `rfc_3339_to_timestamp` from
@@ -253,10 +269,42 @@ The trust roots (auth + crypto) are at 100%. The remaining gaps in
 diagnostic branches that are best exercised by integration tests against
 a live Internxt backend, not more unit mocks.
 
-#### Not yet covered (intentional)
+#### Live integration smoke test
 
-- A vcrpy-recorded contract test against the real Internxt API for one
-  full upload→download cycle. Needs test credentials and a one-time
-  recording session; would lock in the exact wire-format expectations of
-  the production backend so future API changes fail the test in CI
-  rather than in the field.
+`tests/test_live_smoke.py` — opt-in test that runs against the real
+Internxt backend. Auto-skipped unless `IXT_ACCOUNT` and `IXT_PWD` are
+set in env (or in a gitignored `.env` file). Safety properties:
+
+- All operations happen under a **sentinel folder**
+  `/__pytest_internxt_cli_smoke__/<run-uuid>/` with a fresh UUID per
+  run. Nothing outside that prefix is touched.
+- A try/finally cleanup trashes the entire sentinel folder at module
+  teardown, even on test failure.
+- **No cassette recording** — bytes and responses live only in memory;
+  nothing about the user's account is written to the repo.
+
+Tests covered:
+1. Login + whoami (read-only)
+2. List root folder (read-only)
+3. End-to-end cycle: create folder → upload → list → download → assert
+   byte-for-byte recovery
+4. Path resolution against the live folder tree
+
+To run:
+
+```bash
+# Once: put creds in .env (gitignored)
+echo 'IXT_ACCOUNT=you@example.com' > .env
+echo 'IXT_PWD=your-password' >> .env
+
+# Run the live smoke
+pytest tests/test_live_smoke.py -v -s
+
+# Force-skip (e.g., in CI)
+PYTEST_SKIP_LIVE=1 pytest
+```
+
+This test surfaced the `create_folder_recursive` cache-coherency bug
+listed above (item 3 in the Critical bug-fix section), which all the
+unit-mocked tests missed because they stubbed `get_folder_content`
+directly.
