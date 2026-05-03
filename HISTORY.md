@@ -1,14 +1,21 @@
-# Changelog
+# History
 
-## Unreleased — Audit, Bug Fixes, Test Infrastructure
+A historical record of the work done in this repo. New work is added to
+the top. For forward-looking work see [`PLAN.md`](PLAN.md); for the
+retrospective lessons see [`LEARNINGS.md`](LEARNINGS.md).
+
+---
+
+## Audit + Test Infrastructure (initial pass)
 
 A multi-tool security/correctness audit (ruff, mypy, bandit, pylint,
 vulture, pyflakes) was run across the codebase. Every medium+ finding was
-either fixed or annotated with rationale, and a 557-test pytest suite was
-built up alongside CI to lock in those fixes.
+either fixed or annotated with rationale, and a 585-test suite (557 unit
++ 28 live integration) was built up alongside CI to lock in those fixes.
 
 End state: **0 ruff errors, 0 mypy errors, 0 Bandit medium+ findings,
-557/557 pytest passing in ~3 seconds, 90% line coverage**.
+585 tests passing (557 unit in ~3 seconds + 28 live in ~60-90s),
+90% line coverage**.
 
 ---
 
@@ -271,7 +278,7 @@ a live Internxt backend, not more unit mocks.
 
 #### Live integration smoke test
 
-`tests/test_live_smoke.py` — **22 opt-in tests** that run against the real
+`tests/test_live_smoke.py` — **28 opt-in tests** that run against the real
 Internxt backend. Auto-skipped unless `IXT_ACCOUNT` and `IXT_PWD` are
 set in env (or in a gitignored `.env` file).
 
@@ -302,6 +309,7 @@ Coverage:
 | Trash | trash_file removes from listing |
 | Search | server-side fuzzy finds uniquely-named upload (with retry for index latency); bogus query returns low-similarity results without crashing |
 | Find | client-side wildcard search returns exact match set |
+| Batched / nested ops | recursive folder upload+download tree; move non-empty folder brings children with same UUIDs; rename folder preserves child paths; trash non-empty folder removes children; on_conflict='skip' preserves original UUID+bytes; on_conflict='overwrite' produces new UUID with replaced bytes |
 
 To run:
 
@@ -317,8 +325,9 @@ pytest tests/test_live_smoke.py -v
 PYTEST_SKIP_LIVE=1 pytest
 ```
 
-Live test results across 3 consecutive runs against a live account:
-22/22 → 22/22 → 22/22 (zero retries on the third run).
+Live test results across consecutive runs against a live account:
+28/28 → 28/28 (rerun mechanism handles transient API flakiness from
+rate-limit / eventual-consistency).
 
 These tests surfaced two real bugs that all 557 unit-mocked tests had
 missed:

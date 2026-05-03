@@ -327,8 +327,13 @@ Per-module coverage:
 | `services/webdav_server.py`     |     83% |
 | **Total**                       |    **90%** |
 
-See [`CHANGELOG.md`](CHANGELOG.md) for the full audit summary and the
-list of bugs found and fixed during the test build-out.
+### Project documentation
+
+| File | Purpose |
+|---|---|
+| [`HISTORY.md`](HISTORY.md) | What's been done — full audit summary + every bug found and fixed during the test build-out. |
+| [`PLAN.md`](PLAN.md) | What's left — roadmap of unimplemented work: confirmed gaps vs. upstream `internxt/cli`, potential differentiators (folder copy, quota), WebDAV-providers reliability test, known maintenance debt. |
+| [`LEARNINGS.md`](LEARNINGS.md) | Lessons carried forward — what each audit tool actually catches, why unit tests miss certain bugs, safety patterns for live tests against real accounts. |
 
 #### Live integration smoke (optional)
 
