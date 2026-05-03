@@ -270,7 +270,7 @@ internxt-python/
 │   └── webdav_server.py      # WebDAV server management
 ├── utils/
 │   └── api.py                # HTTP API client
-├── tests/                    # Pytest suite (~540 tests, 88% coverage)
+├── tests/                    # Pytest suite (~560 tests, 90% coverage)
 ├── pyproject.toml            # Pytest, coverage, ruff config
 ├── requirements-dev.txt      # Dev/test dependencies
 └── .github/workflows/ci.yml  # Lint + type-check + test on Py 3.10/3.11/3.12
