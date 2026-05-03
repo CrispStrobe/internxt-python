@@ -120,8 +120,8 @@ All Bandit medium+ findings (was 14, now 0) are resolved or annotated:
 | `services/drive.py`             |     87% |
 | `services/network_utils.py`     |     90% |
 | `services/webdav_provider.py`   |     84% |
-| `services/webdav_server.py`     |     58% |
+| `services/webdav_server.py`     |     83% |
 | `utils/api.py`                  |     74% |
-| **Total**                       |    **83%** |
+| **Total**                       |    **85%** |
 
-(Total tests: **480** passing in ~5 seconds.)
+(Total tests: **495** passing in ~3 seconds.)
