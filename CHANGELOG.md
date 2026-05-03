@@ -116,12 +116,12 @@ All Bandit medium+ findings (was 14, now 0) are resolved or annotated:
 |---------------------------------|---------:|
 | `config/config.py`              |     85% |
 | `services/auth.py`              |    100% |
-| `services/crypto.py`            |     85% |
+| `services/crypto.py`            |    100% |
 | `services/drive.py`             |     87% |
 | `services/network_utils.py`     |     90% |
 | `services/webdav_provider.py`   |     84% |
 | `services/webdav_server.py`     |     83% |
-| `utils/api.py`                  |     74% |
-| **Total**                       |    **85%** |
+| `utils/api.py`                  |     98% |
+| **Total**                       |    **88%** |
 
-(Total tests: **495** passing in ~3 seconds.)
+(Total tests: **540** passing in ~3 seconds.)
