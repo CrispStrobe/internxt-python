@@ -187,10 +187,20 @@ def login(email: Optional[str], password: Optional[str], tfa: Optional[str], non
 
 
 @cli.command()
-def whoami():
+@click.option('--json', 'json_out', is_flag=True,
+              help='Emit machine-readable JSON instead of decorated text. '
+                   'Suitable for programmatic consumption from other tools.')
+def whoami(json_out: bool):
     """Check current login status"""
     try:
         user_info = auth_service.whoami()
+        if json_out:
+            import json as _json
+            click.echo(_json.dumps({
+                'logged_in': bool(user_info),
+                'user': user_info or None,
+            }))
+            return
         if user_info:
             click.echo(f"📧 Logged in as: {user_info['email']}")
             click.echo(f"🆔 User ID: {user_info['uuid']}")
@@ -199,6 +209,10 @@ def whoami():
             click.echo("❌ Not logged in")
             click.echo("💡 Use 'python cli.py login' to log in")
     except Exception as e:
+        if json_out:
+            import json as _json
+            click.echo(_json.dumps({'error': str(e)}), err=True)
+            sys.exit(1)
         click.echo(f"❌ Error: {e}", err=True)
 
 
@@ -1258,13 +1272,24 @@ def download(file_uuid: str, destination: str, preserve_timestamps: bool, on_con
 @click.argument('path', default='/')
 @click.option('--detailed', '-d', is_flag=True, help='Show detailed information')
 @click.option('--all', '-a', 'show_all', is_flag=True, help='Show all attributes (verbose)')
-def list_path(path: str, detailed: bool, show_all: bool):
+@click.option('--json', 'json_out', is_flag=True,
+              help='Emit machine-readable JSON ({current_path, folders[], files[]}) '
+                   'instead of decorated text. Suitable for programmatic consumption.')
+def list_path(path: str, detailed: bool, show_all: bool, json_out: bool):
     """List folder contents with paths (much more user-friendly!)"""
     try:
         auth_service.get_auth_details()
-        
+
         content = drive_service.list_folder_with_paths(path)
-        
+
+        if json_out:
+            import json as _json
+            # Emit the raw drive_service output verbatim — it's already a dict
+            # of plain attrs (no Click formatting, no emoji). Consumers can
+            # rely on the `current_path` / `folders` / `files` keys.
+            click.echo(_json.dumps(content, default=str))
+            return
+
         click.echo(f"\n📁 Listing folder: {path}")
         click.echo()
         click.echo(f"📁 Contents of: {content['current_path']}")
@@ -1387,12 +1412,20 @@ def list_path(path: str, detailed: bool, show_all: bool):
             click.echo(f"   Delete by path:   python cli.py trash-path \"{example_path}\"")
     
     except ValueError as e:
-        click.echo(f"❌ Error: {e}", err=True)
+        if json_out:
+            import json as _json
+            click.echo(_json.dumps({'error': str(e)}), err=True)
+        else:
+            click.echo(f"❌ Error: {e}", err=True)
         sys.exit(1)
     except Exception as e:
-        click.echo(f"❌ Unexpected error: {e}", err=True)
-        import traceback
-        traceback.print_exc()
+        if json_out:
+            import json as _json
+            click.echo(_json.dumps({'error': str(e)}), err=True)
+        else:
+            click.echo(f"❌ Unexpected error: {e}", err=True)
+            import traceback
+            traceback.print_exc()
         sys.exit(1)
 
 @cli.command('download-path')
@@ -1780,41 +1813,61 @@ def find(path: str, name_pattern: Optional[str], iname_pattern: Optional[str], m
 
 @cli.command()
 @click.argument('path')
-def resolve(path: str):
+@click.option('--json', 'json_out', is_flag=True,
+              help='Emit machine-readable JSON ({type, uuid, path, metadata}). '
+                   'Suitable for programmatic consumption.')
+def resolve(path: str, json_out: bool):
     """Show what a path points to (debugging tool)"""
     try:
         auth_service.get_auth_details()
-        
+
         resolved = drive_service.resolve_path(path)
-        
+
+        if json_out:
+            import json as _json
+            click.echo(_json.dumps(resolved, default=str))
+            return
+
         click.echo(f"\n🔍 Path resolution for: {path}")
         click.echo("=" * 50)
         click.echo(f"Type: {resolved['type'].upper()}")
         click.echo(f"UUID: {resolved['uuid']}")
         click.echo(f"Resolved path: {resolved['path']}")
-        
+
         if resolved['type'] == 'file':
             metadata = resolved['metadata']
             file_type = metadata.get('type', '')
             size = format_size(metadata.get('size', 0))
             click.echo(f"File type: {file_type}")
             click.echo(f"Size: {size}")
-        
+
         click.echo("\n💡 You can use this path with:")
         if resolved['type'] == 'file':
             click.echo(f"   python cli.py download-path \"{resolved['path']}\"")
             click.echo(f"   python cli.py trash-path \"{resolved['path']}\"")
         else:
             click.echo(f"   python cli.py list-path \"{resolved['path']}\"")
-    
+
     except FileNotFoundError as e:
-        click.echo(f"❌ Path not found: {e}", err=True)
+        if json_out:
+            import json as _json
+            click.echo(_json.dumps({'error': 'not_found', 'message': str(e)}), err=True)
+        else:
+            click.echo(f"❌ Path not found: {e}", err=True)
         sys.exit(1)
     except ValueError as e:
-        click.echo(f"❌ Error: {e}", err=True)
+        if json_out:
+            import json as _json
+            click.echo(_json.dumps({'error': str(e)}), err=True)
+        else:
+            click.echo(f"❌ Error: {e}", err=True)
         sys.exit(1)
     except Exception as e:
-        click.echo(f"❌ Unexpected error: {e}", err=True)
+        if json_out:
+            import json as _json
+            click.echo(_json.dumps({'error': str(e)}), err=True)
+        else:
+            click.echo(f"❌ Unexpected error: {e}", err=True)
         sys.exit(1)
 
 
