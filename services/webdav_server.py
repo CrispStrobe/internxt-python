@@ -136,11 +136,22 @@ class WebDAVServer:
             Dict with success status, message, and URL
         """
         try:
+            # Validate server_choice up-front, before any auth-requiring
+            # setup (provider construction reads credentials).  An invalid
+            # server choice should fail with the explicit ValueError below
+            # regardless of login state — useful when a CI / unit test runs
+            # without credentials.
+            if server_choice not in ('auto', 'waitress', 'cheroot'):
+                raise ValueError(
+                    f"Unknown server choice '{server_choice}'. "
+                    "Use 'auto', 'waitress', or 'cheroot'."
+                )
+
             from wsgidav.wsgidav_app import WsgiDAVApp
             from services.webdav_provider import InternxtDAVProvider
             # Import for SSL
             from services.network_utils import NetworkUtils
-            
+
             # Get configuration
             webdav_config = config_service.read_webdav_config()
             

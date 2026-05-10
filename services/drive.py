@@ -98,8 +98,10 @@ class DriveService:
                 stat = MEMORYSTATUSEX(dwLength=ctypes.sizeof(MEMORYSTATUSEX))
                 ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
                 return stat.ullAvailPhys
-            else:
-                # Linux / other Unix: read from /proc/meminfo
+            elif sys.platform.startswith('linux'):
+                # Read from /proc/meminfo (Linux only — gated explicitly so
+                # tests that patch sys.platform to a synthetic value can
+                # exercise the 4 GB fallback below).
                 with open('/proc/meminfo') as f:
                     for line in f:
                         if line.startswith('MemAvailable:'):

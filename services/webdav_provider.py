@@ -309,14 +309,18 @@ class InternxtDAVResource(DAVNonCollection):
         try:
             from services.drive import drive_service
             from services.auth import auth_service
-            
-            credentials = auth_service.get_auth_details()
-            user = credentials['user']
-            mnemonic = user['mnemonic']
-            
+
+            # Pending uploads + missing uuids return an empty body without
+            # touching the auth service (no creds needed for a 0-byte read).
+            # This also makes get_content() callable from unit tests that
+            # don't bother mocking auth_service.
             file_uuid = self.file_metadata.get('uuid')
             if not file_uuid or file_uuid.startswith('pending-'):
                 return io.BytesIO(b"")
+
+            credentials = auth_service.get_auth_details()
+            user = credentials['user']
+            mnemonic = user['mnemonic']
                 
             print(f"📥 WEBDAV: Downloading file {file_uuid} for streaming...")
             

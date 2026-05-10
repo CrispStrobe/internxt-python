@@ -14,3 +14,10 @@ python-dotenv>=1.0.0
 # (rate limiting / eventual consistency). Required for tests/test_live_smoke.py
 # to be reliable end-to-end; not used by the main unit suite.
 pytest-rerunfailures>=12.0
+
+# Optional WSGI server, alternative to waitress.  Production code probes
+# both at runtime (services/webdav_server.py) and tests in
+# tests/test_webdav_server_start_branches.py exercise the cheroot branch
+# explicitly — they need it importable to reach the FakeCherootServer
+# stub injected via sys.modules.
+cheroot>=10.0
