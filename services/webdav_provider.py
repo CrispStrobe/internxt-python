@@ -868,7 +868,13 @@ class InternxtDAVCollection(DAVCollection):
         return super().get_creation_date() # Fallback
     
     def get_last_modified(self) -> float:
-        """Return folder modification time"""
+        """Return folder modification time.
+
+        WsgiDAV's base get_last_modified() returns None for the root
+        collection unless overridden, but our annotation promises -> float.
+        Always return a real float so callers (notably get_etag) can int()
+        it without crashing on PROPFIND of '/'.
+        """
         try:
             updated_at = self.folder_metadata.get('updatedAt', '')
             if updated_at:
@@ -877,20 +883,31 @@ class InternxtDAVCollection(DAVCollection):
                 return dt.timestamp()
         except Exception:
             pass
-        return super().get_last_modified() # Fallback
-    
+        try:
+            base = super().get_last_modified()
+            if base is not None:
+                return float(base)
+        except Exception:
+            pass
+        # Final fallback: server start time (server-uptime-stable, not
+        # tied to a non-existent folder timestamp).
+        return 0.0
+
     def get_etag(self) -> str:
         """Return ETag for the folder resource - FIXED: no extra quotes"""
         folder_uuid = self.folder_metadata.get('uuid', 'root')
         if folder_uuid != 'root':
             folder_uuid = folder_uuid[:8]
-        modified = int(self.get_last_modified())
-        
+        try:
+            modified = int(self.get_last_modified() or 0)
+        except (TypeError, ValueError):
+            modified = 0
+
         try:
             member_count = len(self._get_content().get('names', []))
         except Exception:
             member_count = 0
-        
+
         # Return WITHOUT quotes - WsgiDAV adds them automatically
         return f"{folder_uuid}-{modified}-{member_count}"
     
