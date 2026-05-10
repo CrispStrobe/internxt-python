@@ -201,25 +201,41 @@ def test_get_content_writes_error_message_to_returned_bytesio():
 # ---------- isolated session: 'no refresh' variant honors thread-local boundary ----------
 
 def test_isolated_session_separate_threads_get_separate_clients():
-    """Thread-local design: different threads get different clients."""
+    """Thread-local design: different threads get different clients.
+
+    Both auth-service patches are hoisted out of the threaded body —
+    `unittest.mock.patch` is not thread-safe, and races between
+    `__enter__` / `__exit__` would let real auth code leak into one of
+    the threads, raise MissingCredentialsError, and leave the
+    `clients[2]` slot unpopulated → KeyError on the assertion.  Patching
+    once for the whole test gives both threads a stable mocked auth
+    surface for the entire window in which they call _get_isolated_session.
+    """
     import threading
 
     api = WebDAVAPIClient()
     fake_creds = {'token': 't', 'newToken': 'nt', 'user': {'email': 'u'}}
 
     clients = {}
+    errors = {}
+
     def grab_client(thread_id):
-        with patch('services.auth.auth_service.get_auth_details',
-                   return_value=fake_creds), \
-             patch('services.auth.auth_service.refresh_tokens'):
+        try:
             clients[thread_id] = api._get_isolated_session()
+        except Exception as e:  # surface, don't silently lose the slot
+            errors[thread_id] = e
 
-    t1 = threading.Thread(target=grab_client, args=(1,))
-    t2 = threading.Thread(target=grab_client, args=(2,))
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
+    with patch('services.auth.auth_service.get_auth_details',
+               return_value=fake_creds), \
+         patch('services.auth.auth_service.refresh_tokens'):
+        t1 = threading.Thread(target=grab_client, args=(1,))
+        t2 = threading.Thread(target=grab_client, args=(2,))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
 
+    # Surface in-thread errors so the failure is the actual cause, not KeyError.
+    assert not errors, f"thread errors: {errors}"
     # Each thread got its own ApiClient
     assert clients[1] is not clients[2]
