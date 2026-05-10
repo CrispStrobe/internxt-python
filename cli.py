@@ -60,7 +60,7 @@ except ImportError as e:
     try:
         # Check for at least one server, matching webdav_server.py
         try:
-            import waitress  # type: ignore[import-untyped]  # noqa: F401  - dependency probe
+            import waitress  # type: ignore[import-untyped, unused-ignore]  # noqa: F401  - dependency probe
         except ImportError:
             import cheroot  # noqa: F401  - dependency probe
     except ImportError:

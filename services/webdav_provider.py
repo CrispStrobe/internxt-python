@@ -428,7 +428,10 @@ class InternxtDAVResource(DAVNonCollection):
                         modification_time = mtime.isoformat()
                         
                         try:
-                            ctime = datetime.fromtimestamp(stat_info.st_birthtime, tz=timezone.utc)
+                            # st_birthtime is macOS/BSD-only; the AttributeError
+                            # branch covers Linux.  mypy's stat_result stub
+                            # doesn't expose it, so silence it here.
+                            ctime = datetime.fromtimestamp(stat_info.st_birthtime, tz=timezone.utc)  # type: ignore[attr-defined, unused-ignore]
                             creation_time = ctime.isoformat()
                         except AttributeError:
                             ctime = datetime.fromtimestamp(stat_info.st_ctime, tz=timezone.utc)
@@ -480,7 +483,8 @@ class InternxtDAVResource(DAVNonCollection):
                             modification_time = mtime.isoformat()
                             
                             try:
-                                ctime = datetime.fromtimestamp(stat_info.st_birthtime, tz=timezone.utc)
+                                # st_birthtime is macOS/BSD-only; AttributeError covers Linux.
+                                ctime = datetime.fromtimestamp(stat_info.st_birthtime, tz=timezone.utc)  # type: ignore[attr-defined, unused-ignore]
                                 creation_time = ctime.isoformat()
                             except AttributeError:
                                 ctime = datetime.fromtimestamp(stat_info.st_ctime, tz=timezone.utc)

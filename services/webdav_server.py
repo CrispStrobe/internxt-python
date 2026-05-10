@@ -22,11 +22,11 @@ WSGI_SERVER: Optional[str] = None
 serve: Any = None
 wsgi: Any = None
 try:
-    from waitress import serve  # type: ignore[import-untyped, no-redef]  # noqa: F811
+    from waitress import serve  # type: ignore[import-untyped, no-redef, unused-ignore]  # noqa: F811
     WSGI_SERVER = 'waitress'
 except ImportError:
     try:
-        from cheroot import wsgi  # noqa: F811
+        from cheroot import wsgi  # type: ignore[import-untyped, no-redef, unused-ignore]  # noqa: F811
         WSGI_SERVER = 'cheroot'
     except ImportError:
         print("❌ No suitable WSGI server found. Install one of:")
