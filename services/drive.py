@@ -253,9 +253,15 @@ class DriveService:
         return self.download_file(file_uuid, destination_path_str)
 
     def list_folder_with_paths(self, folder_path: str = "/") -> Dict[str, List[Dict[str, Any]]]:
-        """List folder contents with full paths"""
-        print(f"📁 Listing folder: {folder_path}")
-        
+        """List folder contents with full paths.
+
+        Note: caller is responsible for any human-readable status output.
+        We used to emit a `📁 Listing folder: …` line here, but that broke
+        machine-readable consumers (CrispSorter's InternxtDrive parses
+        `cli.py list-path --json` and choked on the leading non-JSON
+        bytes).  The CLI's text-mode codepath in `cli.py:list_path`
+        still echoes the header for human users.
+        """
         if folder_path == "" or folder_path == "/":
             resolved = self.resolve_path("/")
         else:
