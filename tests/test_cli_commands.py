@@ -86,6 +86,81 @@ def test_trash_path_missing_returns_error(runner):
     assert result.exit_code == 1
 
 
+# ---------- trash-list ----------
+
+def test_trash_list_empty(runner):
+    with patch('cli.auth_service.get_auth_details', return_value={}), \
+         patch('cli.api_client.get_trash_content', return_value={'files': [], 'folders': []}):
+        result = runner.invoke(cli, ['trash-list'])
+    assert result.exit_code == 0, result.output
+    assert 'empty' in result.output.lower()
+
+
+def test_trash_list_shows_items(runner):
+    items = {'files': [{'plainName': 'doc', 'type': 'pdf', 'size': '1024',
+                         'uuid': 'f1', 'deletedAt': '2025-01-01'}],
+             'folders': [{'plainName': 'Old', 'uuid': 'd1', 'updatedAt': '2025-02-01'}]}
+    with patch('cli.auth_service.get_auth_details', return_value={}), \
+         patch('cli.api_client.get_trash_content', return_value=items):
+        result = runner.invoke(cli, ['trash-list'])
+    assert result.exit_code == 0, result.output
+    assert 'doc.pdf' in result.output
+    assert 'Old' in result.output
+    assert 'f1' in result.output
+
+
+def test_trash_list_json(runner):
+    items = {'files': [{'plainName': 'a', 'type': 'txt', 'size': '10', 'uuid': 'u1'}],
+             'folders': []}
+    with patch('cli.auth_service.get_auth_details', return_value={}), \
+         patch('cli.api_client.get_trash_content', return_value=items):
+        result = runner.invoke(cli, ['trash-list', '--json'])
+    assert result.exit_code == 0, result.output
+    import json
+    parsed = json.loads(result.output)
+    assert len(parsed) == 1
+
+
+# ---------- trash-restore ----------
+
+def test_trash_restore_file(runner):
+    with patch('cli.auth_service.get_auth_details', return_value={}), \
+         patch('cli.api_client.restore_item', return_value={'success': True}):
+        result = runner.invoke(cli, ['trash-restore', 'file-uuid-123'])
+    assert result.exit_code == 0, result.output
+    assert 'Restored' in result.output
+
+
+def test_trash_restore_with_destination(runner):
+    with patch('cli.auth_service.get_auth_details', return_value={}), \
+         patch('cli.drive_service.resolve_path',
+               return_value={'type': 'folder', 'uuid': 'dest-uuid'}), \
+         patch('cli.api_client.restore_item', return_value={'success': True}) as mock_restore:
+        result = runner.invoke(cli, ['trash-restore', 'item-uuid', '-d', '/Documents'])
+    assert result.exit_code == 0, result.output
+    mock_restore.assert_called_once_with('item-uuid', 'file', 'dest-uuid')
+
+
+# ---------- trash-clear ----------
+
+def test_trash_clear_with_force(runner):
+    with patch('cli.auth_service.get_auth_details', return_value={}), \
+         patch('cli.api_client.clear_trash', return_value={}) as mock_clear:
+        result = runner.invoke(cli, ['trash-clear', '--force'])
+    assert result.exit_code == 0, result.output
+    mock_clear.assert_called_once()
+    assert 'cleared' in result.output.lower()
+
+
+def test_trash_clear_aborts_without_confirm(runner):
+    with patch('cli.auth_service.get_auth_details', return_value={}), \
+         patch('cli.api_client.clear_trash') as mock_clear:
+        result = runner.invoke(cli, ['trash-clear'], input='n\n')
+    assert result.exit_code == 0, result.output
+    mock_clear.assert_not_called()
+    assert 'Cancelled' in result.output
+
+
 # ---------- delete-path (PERMANENT, must require confirmation) ----------
 
 def test_delete_path_requires_confirmation_without_force(runner):
@@ -177,6 +252,102 @@ def test_root_help_lists_path_commands(runner):
         assert cmd in result.output, f"missing command in --help: {cmd}"
 
 
+# ---------- quota ----------
+
+def test_quota_shows_usage(runner):
+    usage = {'drive': 1024 * 1024 * 500, 'backup': 0, 'total': 1024 * 1024 * 500}
+    with patch('cli.auth_service.get_auth_details', return_value={}), \
+         patch('cli.api_client.get_storage_usage', return_value=usage):
+        result = runner.invoke(cli, ['quota'])
+    assert result.exit_code == 0, result.output
+    assert 'Storage Usage' in result.output
+    assert 'Drive' in result.output
+
+
+def test_quota_json(runner):
+    usage = {'drive': 100, 'backup': 0, 'total': 100}
+    with patch('cli.auth_service.get_auth_details', return_value={}), \
+         patch('cli.api_client.get_storage_usage', return_value=usage):
+        result = runner.invoke(cli, ['quota', '--json'])
+    assert result.exit_code == 0, result.output
+    import json
+    parsed = json.loads(result.output)
+    assert parsed['total'] == 100
+
+
 def test_unknown_command_returns_nonzero(runner):
     result = runner.invoke(cli, ['this-command-does-not-exist'])
     assert result.exit_code != 0
+
+
+# ---------- login with --tfa-secret (TOTP auto-generation) ----------
+
+def test_login_tfa_secret_generates_code(runner):
+    """--tfa-secret should auto-derive the 6-digit code via pyotp."""
+    import pyotp
+    secret = pyotp.random_base32()
+
+    fake_creds = {
+        'user': {'email': 'u@x.com', 'uuid': 'uid', 'rootFolderId': 'rf'},
+        'token': 'tok',
+    }
+    with patch('cli.auth_service.is_2fa_needed', return_value=True), \
+         patch('cli.auth_service.login', return_value=fake_creds) as mock_login:
+        result = runner.invoke(cli, [
+            'login', '--non-interactive',
+            '--email', 'u@x.com', '--password', 'pw',
+            '--tfa-secret', secret,
+        ])
+    assert result.exit_code == 0, result.output
+    assert 'Generated 2FA code from TOTP secret' in result.output
+    # The auto-generated code was passed to auth_service.login
+    mock_login.assert_called_once()
+    call_args = mock_login.call_args
+    tfa_arg = call_args[0][2] if len(call_args[0]) > 2 else call_args[1].get('tfa_code')
+    assert tfa_arg is not None
+    assert len(tfa_arg) == 6
+    assert tfa_arg.isdigit()
+
+
+def test_login_tfa_secret_via_env_var(runner):
+    """INTERNXT_TFA_SECRET env var should work the same as --tfa-secret."""
+    import pyotp
+    secret = pyotp.random_base32()
+
+    fake_creds = {
+        'user': {'email': 'u@x.com', 'uuid': 'uid', 'rootFolderId': 'rf'},
+        'token': 'tok',
+    }
+    with patch('cli.auth_service.is_2fa_needed', return_value=True), \
+         patch('cli.auth_service.login', return_value=fake_creds), \
+         patch.dict('os.environ', {'INTERNXT_TFA_SECRET': secret}):
+        result = runner.invoke(cli, [
+            'login', '--non-interactive',
+            '--email', 'u@x.com', '--password', 'pw',
+        ])
+    assert result.exit_code == 0, result.output
+    assert 'Generated 2FA code from TOTP secret' in result.output
+
+
+def test_login_explicit_tfa_takes_precedence_over_secret(runner):
+    """If --tfa is provided alongside --tfa-secret, the explicit code wins."""
+    import pyotp
+    secret = pyotp.random_base32()
+
+    fake_creds = {
+        'user': {'email': 'u@x.com', 'uuid': 'uid', 'rootFolderId': 'rf'},
+        'token': 'tok',
+    }
+    with patch('cli.auth_service.is_2fa_needed', return_value=True), \
+         patch('cli.auth_service.login', return_value=fake_creds) as mock_login:
+        result = runner.invoke(cli, [
+            'login', '--non-interactive',
+            '--email', 'u@x.com', '--password', 'pw',
+            '--tfa', '123456', '--tfa-secret', secret,
+        ])
+    assert result.exit_code == 0, result.output
+    # The explicit code was used, not the auto-generated one
+    assert 'Generated 2FA code from TOTP secret' not in result.output
+    call_args = mock_login.call_args
+    tfa_arg = call_args[0][2] if len(call_args[0]) > 2 else call_args[1].get('tfa_code')
+    assert tfa_arg == '123456'

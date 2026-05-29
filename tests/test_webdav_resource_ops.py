@@ -243,17 +243,22 @@ def test_folder_copy_recursive_raises_dav_error_not_implemented():
 
 def test_folder_get_creation_date_parses_iso_creationTime():
     c = _collection(metadata={'creationTime': '2024-01-15T12:00:00Z'})
-    # Folder uses file_metadata for creation_date helper (shared method)
-    c.file_metadata = c.folder_metadata
     ts = c.get_creation_date()
     assert abs(ts - 1705320000) < 2  # 2024-01-15T12:00:00Z
 
 
 def test_folder_get_creation_date_falls_back_to_createdAt():
     c = _collection(metadata={'createdAt': '2024-06-01T00:00:00Z'})
-    c.file_metadata = c.folder_metadata
     ts = c.get_creation_date()
     assert abs(ts - 1717200000) < 2  # 2024-06-01T00:00:00Z
+
+
+def test_folder_get_creation_date_no_file_metadata_attr():
+    """Regression: get_creation_date must use folder_metadata, not file_metadata."""
+    c = _collection(metadata={'creationTime': '2024-01-15T12:00:00Z'})
+    assert not hasattr(c, 'file_metadata')  # class should NOT have this attr
+    ts = c.get_creation_date()
+    assert abs(ts - 1705320000) < 2
 
 
 def test_folder_get_last_modified_parses_updatedAt():

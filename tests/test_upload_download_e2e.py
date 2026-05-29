@@ -65,7 +65,7 @@ def test_upload_round_trips_through_real_crypto(tmp_path, fake_user_creds, serve
     # 2. Set up "network" — capture upload, replay on download
     captured_index = {}
 
-    def fake_start_upload(bucket_id, file_size, auth):
+    def fake_start_upload(bucket_id, file_size, auth, parts=1, chunk_size=0):
         return {'uploads': [{
             'index': 0, 'size': file_size,
             'url': 'https://upload-url.example/blob1',
@@ -173,7 +173,7 @@ def test_upload_invalidates_destination_folder_cache(tmp_path, fake_user_creds, 
         {'folders': [], 'files': []},
     )
 
-    def fake_start_upload(bucket_id, file_size, auth):
+    def fake_start_upload(bucket_id, file_size, auth, parts=1, chunk_size=0):
         return {'uploads': [{
             'index': 0, 'size': file_size, 'url': 'u', 'uuid': 'nu',
         }]}

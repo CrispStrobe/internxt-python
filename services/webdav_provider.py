@@ -599,6 +599,53 @@ class InternxtDAVResource(DAVNonCollection):
             print(f"❌ WEBDAV: Error moving file: {e}")
             raise DAVError(HTTP_FORBIDDEN, f"Could not move file: {e}") from e
     
+    def set_property(self, name, value, depth="0"):
+        """Set a property on a file (called by PROPPATCH).
+
+        Mirrors the folder implementation on InternxtDAVCollection so that
+        rclone --metadata and file-manager clients can set timestamps on
+        files, not just folders.
+        """
+        from services.drive import drive_service
+        from wsgidav.util import parse_time_string
+        from datetime import datetime, timezone
+
+        print(f"🔍 WEBDAV: PROPPATCH set_property('{name}', '{value}') on file")
+
+        if name in ("{DAV:}creationdate", "{urn:schemas-microsoft-com:}creationdate"):
+            try:
+                dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                iso_timestamp = dt.isoformat()
+                drive_service.set_file_timestamps(
+                    self.file_metadata['uuid'],
+                    creation_time=iso_timestamp
+                )
+            except Exception as e:
+                print(f"❌ WEBDAV: Error setting file creationdate: {e}")
+                raise DAVError(HTTP_FORBIDDEN, "Failed to set creation date") from e
+
+        elif name in ("{DAV:}getlastmodified", "{urn:schemas-microsoft-com:}Win32LastModifiedTime"):
+            try:
+                ts = parse_time_string(value)
+                if ts is None:
+                    dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                    ts = dt.timestamp()
+
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                iso_timestamp = dt.isoformat()
+
+                drive_service.set_file_timestamps(
+                    self.file_metadata['uuid'],
+                    modification_time=iso_timestamp
+                )
+            except Exception as e:
+                print(f"❌ WEBDAV: Error setting file getlastmodified: {e}")
+                raise DAVError(HTTP_FORBIDDEN, "Failed to set modification date") from e
+
+        else:
+            print(f"⚠️  WEBDAV: Ignored file set_property for '{name}'")
+            super().set_property(name, value, depth)
+
     def copy_move(self, dest_path):
         """Copy this file"""
         print(f"📋 WEBDAV: Copying file from {self.path} to {dest_path}")
@@ -856,16 +903,38 @@ class InternxtDAVCollection(DAVCollection):
             raise DAVError(HTTP_FORBIDDEN, f"Could not move folder: {e}")
     
     def copy_recursive(self, dest_path):
-        """Copy this folder"""
+        """Copy this folder recursively via the drive service."""
         print(f"📋 WEBDAV: Copying folder from {self.path} to {dest_path}")
-        # Folder copying is complex and not implemented in drive_service
-        raise DAVError(HTTP_FORBIDDEN, "Folder copying not implemented yet")
+
+        try:
+            from services.drive import drive_service
+            from services.auth import auth_service
+
+            # Parse destination
+            dest_parts = dest_path.strip('/').split('/')
+            if len(dest_parts) > 1:
+                parent_path = '/' + '/'.join(dest_parts[:-1])
+                resolved = drive_service.resolve_path(parent_path)
+                parent_uuid = resolved['uuid']
+            else:
+                credentials = auth_service.get_auth_details()
+                parent_uuid = credentials['user'].get('rootFolderId', '')
+
+            dest_name = dest_parts[-1] if dest_parts else None
+            result = drive_service.copy_folder(
+                self.folder_metadata['uuid'], parent_uuid, dest_name
+            )
+            print(f"✅ WEBDAV: Copied folder to {dest_path} ({result['message']})")
+
+        except Exception as e:
+            print(f"❌ WEBDAV: Error copying folder: {e}")
+            raise DAVError(HTTP_FORBIDDEN, f"Could not copy folder: {e}") from e
     
     def get_creation_date(self) -> float:
         """Return file creation time as timestamp"""
         try:
             # Priority: creationTime > createdAt (SDK-compatible fields)
-            creation_time = self.file_metadata.get('creationTime') or self.file_metadata.get('createdAt')
+            creation_time = self.folder_metadata.get('creationTime') or self.folder_metadata.get('createdAt')
             
             if creation_time:
                 from datetime import datetime

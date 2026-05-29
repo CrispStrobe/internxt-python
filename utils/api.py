@@ -321,12 +321,27 @@ class ApiClient:
     
     def get_trash_content(self, offset: int = 0, limit: int = 50, item_type: str = 'both') -> Dict[str, Any]:
         """
-        Get trash content
-        Real SDK: GET /storage/trash with pagination params
+        Get trash content.
+
+        The server requires *type* to be ``'files'`` or ``'folders'`` — it
+        rejects ``'both'``.  When *item_type* is ``'both'`` we issue two
+        requests and merge the results.
         """
         url = f"{self.drive_api_url}/storage/trash/paginated"
-        params = {'offset': offset, 'limit': limit, 'type': item_type}
-        return self.get(url, params=params)
+
+        if item_type == 'both':
+            files_resp = self.get(url, params={'offset': offset, 'limit': limit, 'type': 'files'})
+            folders_resp = self.get(url, params={'offset': offset, 'limit': limit, 'type': 'folders'})
+            return {
+                'files': files_resp.get('result', []),
+                'folders': folders_resp.get('result', []),
+            }
+
+        resp = self.get(url, params={'offset': offset, 'limit': limit, 'type': item_type})
+        items = resp.get('result', [])
+        if item_type == 'files':
+            return {'files': items, 'folders': []}
+        return {'files': [], 'folders': items}
 
     def clear_trash(self) -> Dict[str, Any]:
         """
@@ -380,9 +395,16 @@ class ApiClient:
 
     # ========== NETWORK API ENDPOINTS ==========
     
-    def start_upload(self, bucket_id: str, file_size: int, auth: tuple) -> Dict[str, Any]:
+    def start_upload(self, bucket_id: str, file_size: int, auth: tuple,
+                     parts: int = 1, chunk_size: int = 0) -> Dict[str, Any]:
         """
-        Gets upload URLs for a file
+        Gets upload URLs for a file.
+
+        The Internxt network API always uses multiparts=1 (single pre-signed
+        URL). The *parts* and *chunk_size* parameters are accepted for
+        forward compatibility but currently ignored — the server returns
+        one upload URL regardless.
+
         Real SDK: POST /v2/buckets/{bucketId}/files/start?multiparts=1
         """
         url = f"{self.network_url}/v2/buckets/{bucket_id}/files/start?multiparts=1"

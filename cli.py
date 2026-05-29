@@ -105,9 +105,13 @@ def cli():
 @click.option('--email', '-e', help='Your Internxt email')
 @click.option('--password', '-p', help='Your password')
 @click.option('--tfa', '--2fa', help='Two-factor authentication code (6 digits)')
+@click.option('--tfa-secret', envvar='INTERNXT_TFA_SECRET',
+              help='TOTP secret (base32) to auto-generate 2FA codes. '
+                   'Can also be set via INTERNXT_TFA_SECRET env var.')
 @click.option('--non-interactive', is_flag=True, help='Run in non-interactive mode')
 @click.option('--debug', is_flag=True, help='Enable debug output')
-def login(email: Optional[str], password: Optional[str], tfa: Optional[str], non_interactive: bool, debug: bool):
+def login(email: Optional[str], password: Optional[str], tfa: Optional[str],
+          tfa_secret: Optional[str], non_interactive: bool, debug: bool):
     """Login to your Internxt account"""
     try:
         if debug:
@@ -149,6 +153,20 @@ def login(email: Optional[str], password: Optional[str], tfa: Optional[str], non
             click.echo(f"⚠️  Could not check 2FA status: {e}")
             is_2fa_needed = False
         
+        # Auto-derive 2FA code from TOTP secret if provided
+        if is_2fa_needed and not tfa and tfa_secret:
+            try:
+                import pyotp
+                totp = pyotp.TOTP(tfa_secret)
+                tfa = totp.now()
+                click.echo("🔑 Generated 2FA code from TOTP secret")
+            except ImportError:
+                click.echo("❌ pyotp is required for --tfa-secret. Run: pip install pyotp", err=True)
+                sys.exit(1)
+            except Exception as e:
+                click.echo(f"❌ Failed to generate TOTP code: {e}", err=True)
+                sys.exit(1)
+
         if is_2fa_needed and not tfa:
             if non_interactive:
                 click.echo("❌ 2FA code is required in non-interactive mode", err=True)
@@ -1987,6 +2005,118 @@ def trash_by_path(path: str, force: bool):
         sys.exit(1)
 
 
+@cli.command('trash-list')
+@click.option('--type', '-t', 'item_type', type=click.Choice(['files', 'folders', 'both']),
+              default='both', help='Filter by item type')
+@click.option('--limit', '-l', default=50, help='Max items to show')
+@click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
+def trash_list(item_type: str, limit: int, as_json: bool):
+    """List items in trash"""
+    try:
+        auth_service.get_auth_details()
+
+        offset = 0
+        all_items = []
+        while True:
+            page_size = min(limit - len(all_items), 50)
+            result = api_client.get_trash_content(offset=offset, limit=page_size,
+                                                   item_type=item_type)
+            files = result.get('files', [])
+            folders = result.get('folders', [])
+            batch = files + folders
+            all_items.extend(batch)
+            if not batch or len(all_items) >= limit or len(batch) < page_size:
+                break
+            offset += len(batch)
+
+        if as_json:
+            import json
+            click.echo(json.dumps(all_items, indent=2, default=str))
+            return
+
+        if not all_items:
+            click.echo("🗑️  Trash is empty")
+            return
+
+        click.echo(f"🗑️  Trash ({len(all_items)} items):\n")
+        for item in all_items:
+            name = item.get('plainName') or item.get('name', '???')
+            ext = item.get('type', '')
+            display = f"{name}.{ext}" if ext and 'size' in item else name
+            kind = 'file' if 'size' in item else 'folder'
+            size_str = f" ({drive_service._format_size(int(item['size']))})" if 'size' in item else ""
+            uuid = item.get('uuid', '???')
+            deleted = item.get('deletedAt', item.get('updatedAt', ''))
+            click.echo(f"  [{kind:6}] {display}{size_str}")
+            click.echo(f"          UUID: {uuid}  Deleted: {deleted}")
+
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command('trash-restore')
+@click.argument('uuid_or_path')
+@click.option('--destination', '-d', default=None,
+              help='Destination folder path (default: original location)')
+def trash_restore(uuid_or_path: str, destination: Optional[str]):
+    """Restore an item from trash by UUID or path.
+
+    Examples:
+      python cli.py trash-restore abc-def-123
+      python cli.py trash-restore abc-def-123 --destination /Documents
+    """
+    try:
+        auth_service.get_auth_details()
+
+        dest_uuid = None
+        if destination:
+            resolved = drive_service.resolve_path(destination)
+            if resolved['type'] != 'folder':
+                click.echo(f"❌ Destination must be a folder: {destination}", err=True)
+                sys.exit(1)
+            dest_uuid = resolved['uuid']
+
+        # Try as file first, then folder
+        item_uuid = uuid_or_path
+        for itype in ('file', 'folder'):
+            try:
+                api_client.restore_item(item_uuid, itype, dest_uuid)
+                click.echo(f"✅ Restored {itype} {item_uuid}")
+                return
+            except Exception:
+                continue
+
+        click.echo(f"❌ Could not restore item {item_uuid} — not found in trash", err=True)
+        sys.exit(1)
+
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command('trash-clear')
+@click.option('--force', '-f', is_flag=True, help='Skip confirmation')
+def trash_clear(force: bool):
+    """Permanently delete ALL items in trash (CANNOT BE UNDONE!)"""
+    try:
+        auth_service.get_auth_details()
+
+        if not force:
+            click.echo("⚠️  WARNING: This will PERMANENTLY delete ALL items in trash!")
+            click.echo("   This action cannot be undone.")
+            if not click.confirm('Clear all trash?'):
+                click.echo("❌ Cancelled")
+                return
+
+        api_client.clear_trash()
+        click.echo("✅ Trash cleared")
+
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        sys.exit(1)
+
+
 @cli.command('delete')
 @click.argument('file_or_folder_uuid')
 @click.option('--force', '-f', is_flag=True, help='Skip confirmation')
@@ -2480,6 +2610,34 @@ def webdav_regenerate_ssl():
         sys.exit(1)
 
 
+@cli.command('quota')
+@click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
+def quota(as_json: bool):
+    """Show storage usage"""
+    try:
+        auth_service.get_auth_details()
+        usage = api_client.get_storage_usage()
+
+        if as_json:
+            import json
+            click.echo(json.dumps(usage, indent=2, default=str))
+            return
+
+        drive_bytes = usage.get('drive', 0)
+        backup_bytes = usage.get('backup', 0)
+        total_bytes = usage.get('total', 0)
+
+        click.echo("📊 Storage Usage:\n")
+        click.echo(f"  Drive:   {drive_service._format_size(drive_bytes)}")
+        if backup_bytes:
+            click.echo(f"  Backups: {drive_service._format_size(backup_bytes)}")
+        click.echo(f"  Total:   {drive_service._format_size(total_bytes)}")
+
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        sys.exit(1)
+
+
 @cli.command('webdav-config')
 def webdav_config_cmd():
     """Show WebDAV server configuration"""
@@ -2696,13 +2854,16 @@ def help_extended():
 🛣️  PATH-BASED OPERATIONS (User-friendly!)
   list-path [PATH]  List folder contents with readable paths
   download-path PATH Download file by path (e.g., "/Documents/report.pdf")
-  find PATTERN      Search files with wildcards (e.g., "*.pdf")
+  find [PATH] -name PATTERN  Search files with wildcards
   resolve PATH      Show what a path points to (debugging)
   tree [PATH]       Show folder structure as tree
 
 🗑️  DELETE/TRASH OPERATIONS
   trash UUID        Move file/folder to trash by UUID
   trash-path PATH   Move file/folder to trash by path
+  trash-list        List items in trash
+  trash-restore UUID Restore item from trash
+  trash-clear       Permanently delete ALL trash (⚠️ CANNOT BE UNDONE!)
   delete UUID       Permanently delete by UUID (⚠️ CANNOT BE UNDONE!)
   delete-path PATH  Permanently delete by path (⚠️ CANNOT BE UNDONE!)
 
@@ -2715,6 +2876,7 @@ def help_extended():
 
 🔧 UTILITIES
   config            Show current configuration
+  quota             Show storage usage
   test              Test CLI components
 
 💡 EXAMPLES:
@@ -2724,7 +2886,7 @@ def help_extended():
   python cli.py tree
   
   # Find and download files
-  python cli.py find "*.pdf"
+  python cli.py find / -name "*.pdf"
   python cli.py download-path "/Documents/important.pdf"
   
   # Mount as local drive (AMAZING!)

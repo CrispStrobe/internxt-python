@@ -1,6 +1,7 @@
 """Tests for WebDAVServer._run_server_thread, stop() running-server path,
 and test_connection() PROPFIND probe.
 """
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +15,36 @@ def server():
     s = WebDAVServer()
     s._setup_signal_handlers = lambda: None
     return s
+
+
+# ---------- _setup_signal_handlers thread safety ----------
+
+def test_setup_signal_handlers_skips_non_main_thread():
+    """Calling _setup_signal_handlers from a non-main thread must be a
+    no-op (no ValueError), so background mode doesn't crash."""
+    srv = WebDAVServer()
+    error = None
+
+    def run_in_thread():
+        nonlocal error
+        try:
+            srv._setup_signal_handlers()
+        except Exception as exc:
+            error = exc
+
+    t = threading.Thread(target=run_in_thread)
+    t.start()
+    t.join(timeout=5)
+    assert error is None, f"_setup_signal_handlers raised in non-main thread: {error}"
+
+
+def test_setup_signal_handlers_runs_in_main_thread():
+    """When called from the main thread, signal handlers should be registered."""
+    srv = WebDAVServer()
+    with patch('signal.signal') as mock_signal:
+        srv._setup_signal_handlers()
+    # Should have registered SIGINT and SIGTERM
+    assert mock_signal.call_count == 2
 
 
 # ---------- _run_server_thread (waitress branch) ----------

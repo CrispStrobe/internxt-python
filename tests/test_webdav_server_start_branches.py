@@ -86,6 +86,17 @@ def test_auto_falls_back_to_global_wsgi_server(server):
     assert captured['serve_kwargs']['host'] == '127.0.0.1'
 
 
+def test_start_config_includes_property_manager_and_lock_storage(server):
+    """Regression: start() config must include property_manager and lock_storage
+    so that PROPPATCH dead properties and LOCK are handled by WsgiDAV."""
+    result, captured = _start_with_mocks(server, server_choice='auto',
+                                          wsgi_server='waitress')
+    cfg = captured['app_config']
+    assert cfg is not None
+    assert cfg.get('property_manager') is True
+    assert cfg.get('lock_storage') is True
+
+
 def test_explicit_waitress_choice_uses_waitress(server):
     result, captured = _start_with_mocks(server, server_choice='waitress',
                                           wsgi_server='cheroot')  # global says cheroot
@@ -93,6 +104,9 @@ def test_explicit_waitress_choice_uses_waitress(server):
     assert captured['serve_kwargs'] is not None
 
 
+@pytest.mark.skipif(
+    not __import__('importlib').util.find_spec('cheroot'),
+    reason="cheroot not installed")
 def test_explicit_cheroot_choice_uses_cheroot(server):
     result, captured = _start_with_mocks(server, server_choice='cheroot',
                                           wsgi_server='waitress')
@@ -121,6 +135,9 @@ def test_https_with_waitress_falls_back_to_http(server):
     assert 'ssl_certificate' not in captured['serve_kwargs']
 
 
+@pytest.mark.skipif(
+    not __import__('importlib').util.find_spec('cheroot'),
+    reason="cheroot not installed")
 def test_https_with_cheroot_attempts_ssl_setup(server):
     """Cheroot path must try to wire a BuiltinSSLAdapter."""
     import sys
@@ -144,6 +161,9 @@ def test_https_with_cheroot_attempts_ssl_setup(server):
     fake_adapter_class.assert_called_once()
 
 
+@pytest.mark.skipif(
+    not __import__('importlib').util.find_spec('cheroot'),
+    reason="cheroot not installed")
 def test_https_with_cheroot_generates_certs_when_missing(server):
     """If cert/key files are missing on disk, SSL setup must generate them."""
     import sys

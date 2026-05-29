@@ -732,6 +732,64 @@ class DriveService:
         except Exception as e:
             raise Exception(f"Copy failed: {e}") from e
         
+    def copy_folder(self, source_folder_uuid: str, destination_parent_uuid: str,
+                    folder_name: Optional[str] = None) -> Dict[str, Any]:
+        """Recursively copy a folder and its contents to a new parent.
+
+        Creates the folder structure first, then copies each file via
+        download-and-re-upload (same strategy as copy_item for files).
+        """
+        # Get source folder metadata
+        source_meta = self.api.get_folder_metadata(source_folder_uuid)
+        name = folder_name or source_meta.get('plainName', 'Untitled')
+        creation_time = source_meta.get('creationTime') or source_meta.get('createdAt')
+        modification_time = source_meta.get('modificationTime') or source_meta.get('updatedAt')
+
+        # Create destination folder
+        payload: Dict[str, Any] = {
+            'plainName': name,
+            'parentFolderUuid': destination_parent_uuid,
+        }
+        if creation_time:
+            payload['creationTime'] = creation_time
+        if modification_time:
+            payload['modificationTime'] = modification_time
+
+        new_folder = self.create_folder(payload)
+        new_folder_uuid = new_folder['uuid']
+        print(f"     📁 Created folder: {name} → {new_folder_uuid}")
+
+        # Get source contents
+        content = self.get_folder_content(source_folder_uuid)
+        files = content.get('files', [])
+        folders = content.get('folders', [])
+
+        copied_files = 0
+        copied_folders = 0
+
+        # Copy subfolders recursively
+        for subfolder in folders:
+            sub_uuid = subfolder.get('uuid')
+            sub_name = subfolder.get('plainName', 'Untitled')
+            if sub_uuid:
+                self.copy_folder(sub_uuid, new_folder_uuid, sub_name)
+                copied_folders += 1
+
+        # Copy files
+        for file_item in files:
+            file_uuid = file_item.get('uuid')
+            if file_uuid:
+                self.copy_item(file_uuid, new_folder_uuid)
+                copied_files += 1
+
+        return {
+            'success': True,
+            'message': f'Folder "{name}" copied ({copied_files} files, {copied_folders} subfolders)',
+            'uuid': new_folder_uuid,
+            'files_copied': copied_files,
+            'folders_copied': copied_folders,
+        }
+
     def create_upload_checkpoint(self, file_path: Path, target_uuid: str) -> str:
         """
         Create a checkpoint file for resumable uploads.
@@ -1696,6 +1754,25 @@ class DriveService:
         result = self.api.update_folder_metadata(folder_uuid, payload)
         # Invalidate the parent-folder cache so subsequent listings see new times.
         self._clear_parent_cache_for_item(folder_uuid, 'folder')
+        return result
+
+    def set_file_timestamps(self, file_uuid: str,
+                            creation_time: Optional[str] = None,
+                            modification_time: Optional[str] = None) -> Dict[str, Any]:
+        """Update creation/modification timestamps on an existing file.
+
+        Used by the WebDAV provider's PROPPATCH handler so file managers
+        and rclone --metadata can set file timestamps on the remote.
+        """
+        if not creation_time and not modification_time:
+            raise ValueError("Must provide creation_time or modification_time")
+        payload: Dict[str, Any] = {}
+        if creation_time:
+            payload['creationTime'] = creation_time
+        if modification_time:
+            payload['modificationTime'] = modification_time
+        result = self.api.update_file_metadata(file_uuid, payload)
+        self._clear_parent_cache_for_item(file_uuid, 'file')
         return result
 
 

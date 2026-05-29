@@ -77,11 +77,12 @@ def test_get_trash_content_paginated(capture):
 
 
 def test_get_trash_content_defaults(capture):
+    """Default item_type='both' issues two requests (files + folders)."""
     api_client.get_trash_content()
-    _, _, kwargs = capture[-1]
-    assert kwargs['params']['offset'] == 0
-    assert kwargs['params']['limit'] == 50
-    assert kwargs['params']['type'] == 'both'
+    # Two requests: one for files, one for folders
+    assert len(capture) >= 2
+    types_seen = {c[2]['params']['type'] for c in capture[-2:]}
+    assert types_seen == {'files', 'folders'}
 
 
 def test_clear_trash_uses_delete_all(capture):

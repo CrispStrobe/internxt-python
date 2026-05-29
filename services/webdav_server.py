@@ -8,6 +8,7 @@ import sys
 import signal
 import socket
 import atexit
+import threading
 from typing import Optional, Dict, Any
 
 try:
@@ -174,6 +175,8 @@ class WebDAVServer:
                 "provider_mapping": {"/": provider},
                 "simple_dc": {"user_mapping": {"*": {"internxt": {"password": "internxt-webdav"}}}},
                 "verbose": 1,
+                "property_manager": True,
+                "lock_storage": True,
                 "logging": {
                     "enable": True,
                     "enable_loggers": ["wsgidav"],
@@ -314,14 +317,22 @@ class WebDAVServer:
             }
     
     def _setup_signal_handlers(self):
-        """Setup signal handlers (only works in main thread)"""
+        """Setup signal handlers (only works in main thread).
+
+        Silently skips registration when called from a non-main thread
+        (e.g. when the WSGI server is started in a background thread)
+        to avoid ``ValueError: signal only works in main thread``.
+        """
+        if threading.current_thread() is not threading.main_thread():
+            return
+
         def signal_handler(signum, frame):
             print(f"\n🛑 Received signal {signum}, stopping WebDAV server...")
             self.is_stopping = True
             self.is_running = False
             config_service.clear_webdav_pid()
             os._exit(0)
-        
+
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
     

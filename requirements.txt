@@ -13,6 +13,9 @@ waitress
 # Optional: for better SSL certificate handling
 pyOpenSSL>=23.0.0
 
+# Optional: TOTP code generation from a secret (for automated/Docker login)
+pyotp>=2.9.0
+
 # Development dependencies (optional)
 # pytest>=7.4.0
 # black>=23.0.0

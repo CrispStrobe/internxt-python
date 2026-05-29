@@ -221,3 +221,65 @@ def test_find_files_handles_listing_error_in_subfolder():
 
     # Found the file in /Good even though /Bad errored
     assert any(r['display_name'] == 'g.pdf' for r in results)
+
+
+# ---------- copy_folder ----------
+
+def test_copy_folder_creates_structure_and_copies_files():
+    """copy_folder must create the folder, recurse into subfolders, and copy files."""
+    fake_folder_meta = {'plainName': 'Src', 'uuid': 'src-uuid',
+                        'creationTime': '2025-01-01T00:00:00Z'}
+    fake_new_folder = {'uuid': 'new-uuid', 'plainName': 'Src'}
+    fake_content = {
+        'files': [{'uuid': 'file-1', 'plainName': 'a.txt', 'type': 'txt'}],
+        'folders': [{'uuid': 'sub-1', 'plainName': 'Sub'}],
+    }
+    # Subfolder is empty
+    fake_sub_meta = {'plainName': 'Sub', 'uuid': 'sub-1'}
+    fake_sub_folder = {'uuid': 'newsub-uuid', 'plainName': 'Sub'}
+    fake_sub_content = {'files': [], 'folders': []}
+
+    call_count = {'get_folder_metadata': 0, 'create_folder': 0,
+                  'get_folder_content': 0}
+
+    def fake_get_meta(uuid):
+        call_count['get_folder_metadata'] += 1
+        return fake_folder_meta if uuid == 'src-uuid' else fake_sub_meta
+
+    def fake_create(payload):
+        call_count['create_folder'] += 1
+        if payload['plainName'] == 'Src':
+            return fake_new_folder
+        return fake_sub_folder
+
+    def fake_get_content(uuid):
+        call_count['get_folder_content'] += 1
+        return fake_content if uuid == 'src-uuid' else fake_sub_content
+
+    with patch.object(drive_service.api, 'get_folder_metadata', side_effect=fake_get_meta), \
+         patch.object(drive_service, 'create_folder', side_effect=fake_create), \
+         patch.object(drive_service, 'get_folder_content', side_effect=fake_get_content), \
+         patch.object(drive_service, 'copy_item', return_value={'success': True}) as mock_copy:
+        result = drive_service.copy_folder('src-uuid', 'dest-parent')
+
+    assert result['success'] is True
+    assert result['files_copied'] == 1
+    assert result['folders_copied'] == 1
+    assert result['uuid'] == 'new-uuid'
+    # copy_item was called for the file
+    mock_copy.assert_called_once_with('file-1', 'new-uuid')
+
+
+def test_copy_folder_empty():
+    """Copying an empty folder should succeed with 0 files/folders."""
+    with patch.object(drive_service.api, 'get_folder_metadata',
+                      return_value={'plainName': 'E', 'uuid': 'e'}), \
+         patch.object(drive_service, 'create_folder',
+                      return_value={'uuid': 'new-e', 'plainName': 'E'}), \
+         patch.object(drive_service, 'get_folder_content',
+                      return_value={'files': [], 'folders': []}):
+        result = drive_service.copy_folder('e', 'parent')
+
+    assert result['success'] is True
+    assert result['files_copied'] == 0
+    assert result['folders_copied'] == 0
