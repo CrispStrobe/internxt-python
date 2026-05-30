@@ -746,16 +746,12 @@ class DriveService:
         modification_time = source_meta.get('modificationTime') or source_meta.get('updatedAt')
 
         # Create destination folder
-        payload: Dict[str, Any] = {
-            'plainName': name,
-            'parentFolderUuid': destination_parent_uuid,
-        }
-        if creation_time:
-            payload['creationTime'] = creation_time
-        if modification_time:
-            payload['modificationTime'] = modification_time
-
-        new_folder = self.create_folder(payload)
+        new_folder = self.create_folder(
+            name,
+            destination_parent_uuid,
+            creation_time=creation_time,
+            modification_time=modification_time,
+        )
         new_folder_uuid = new_folder['uuid']
         print(f"     📁 Created folder: {name} → {new_folder_uuid}")
 

@@ -270,7 +270,7 @@ internxt-python/
 │   └── webdav_server.py      # WebDAV server management
 ├── utils/
 │   └── api.py                # HTTP API client
-├── tests/                    # Pytest suite (~560 tests, 90% coverage)
+├── tests/                    # Pytest suite (622 tests, 90% coverage)
 ├── pyproject.toml            # Pytest, coverage, ruff config
 ├── requirements-dev.txt      # Dev/test dependencies
 └── .github/workflows/ci.yml  # Lint + type-check + test on Py 3.10/3.11/3.12
@@ -294,7 +294,8 @@ pip install -r requirements-dev.txt
 
 ### Running Tests
 
-The project ships with a 557-test pytest suite at **90% line coverage**.
+The project ships with a 591-test unit suite at **90% line coverage**
+(plus 31 optional live tests — 622 total).
 It covers crypto round-trips, path resolution, upload/download conflict
 handling, the WebDAV provider, all major CLI commands, and a real
 encrypt → upload → "wire" → download → decrypt round-trip cycle.
@@ -337,7 +338,7 @@ Per-module coverage:
 
 #### Live integration smoke (optional)
 
-`tests/test_live_smoke.py` is a 22-test suite that runs end-to-end
+`tests/test_live_smoke.py` is a 31-test suite that runs end-to-end
 against the real Internxt backend, covering: login, list, upload (small
 + unicode + extensionless + 2 MB), download with byte-for-byte
 verification, recursive folder creation, file rename/move/copy/update,

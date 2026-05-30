@@ -351,7 +351,7 @@ class ApiClient:
         url = f"{self.drive_api_url}/storage/trash/all"
         return self.delete(url)
 
-    def restore_item(self, item_uuid: str, item_type: str, destination_folder_uuid: str = None) -> Dict[str, Any]:
+    def restore_item(self, item_uuid: str, item_type: str, destination_folder_uuid: Optional[str] = None) -> Dict[str, Any]:
         """
         Restore item from trash - keeping original implementation
         (Not clearly shown in provided SDK snippets)

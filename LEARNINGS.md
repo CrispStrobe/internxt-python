@@ -60,6 +60,19 @@ backend does. Integration tests verify what the backend actually
 does.** Both are needed. Unit tests for fast iteration on code logic;
 live tests as a contract check.
 
+### A mock can hide a real signature mismatch — mypy won't
+
+`copy_folder` called `self.create_folder(payload_dict)` while the real
+`DriveService.create_folder(name, parent_folder_uuid, ...)` expects a
+string. The test passed for months because its `fake_create(payload)`
+mock accepted exactly the wrong shape the production code was sending —
+the mock was written against the bug, not against the signature. mypy's
+`arg-type` error was the only thing that caught it. Lesson: **when a test
+mocks a method, mock its real signature, not the call site you happen to
+have.** And keep the type gate green in CI, not just locally — a split
+toolchain (mypy and pip pointing at different interpreters) silently
+masked it on the dev machine.
+
 ---
 
 ## On the trust roots

@@ -246,9 +246,10 @@ def test_copy_folder_creates_structure_and_copies_files():
         call_count['get_folder_metadata'] += 1
         return fake_folder_meta if uuid == 'src-uuid' else fake_sub_meta
 
-    def fake_create(payload):
+    def fake_create(name, parent_folder_uuid=None, creation_time=None,
+                    modification_time=None):
         call_count['create_folder'] += 1
-        if payload['plainName'] == 'Src':
+        if name == 'Src':
             return fake_new_folder
         return fake_sub_folder
 

@@ -6,6 +6,33 @@ retrospective lessons see [`LEARNINGS.md`](LEARNINGS.md).
 
 ---
 
+## CI mypy-gate fix (2026-05-30)
+
+The 2026-05-29 issues-fixes commit (`f5bf51c`) was green locally but the CI
+**Type check (mypy)** step fast-failed (24s) with 10 errors. The earlier
+local runs hadn't caught them because of a split toolchain (homebrew mypy /
+conda python / framework pip) where the freshly-installed stubs landed in a
+different interpreter than the one mypy actually used. Fixes:
+
+- **`types-requests` missing.** mypy reported "Library stubs not installed
+  for requests" at 7 sites. Added `types-requests>=2.31.0` to
+  `requirements-dev.txt`. CI installs everything into one venv, so the
+  requirements line is sufficient there.
+- **Latent `create_folder` signature bug.** `copy_folder` (`drive.py`) called
+  `self.create_folder(payload_dict)`, but `DriveService.create_folder` takes
+  `(name, parent_folder_uuid, ...)` — the dict was being passed as `name`.
+  The unit test masked it with a `fake_create(payload)` mock, so only mypy's
+  `arg-type` error flagged it. Fixed the call to pass named args and updated
+  the test mock to match the real signature.
+- **Two minor type errors:** annotated `all_items: list` in `cli.py` and
+  changed `restore_item`'s `destination_folder_uuid: str = None` to
+  `Optional[str]` in `utils/api.py`.
+
+All four gates (ruff, mypy, bandit, pytest) pass again. Test count:
+**591 unit + 31 live = 622**, re-verified against live credentials.
+
+---
+
 ## GitHub Issues Fixes + Feature Work (2026-05-29)
 
 Two rounds of work addressing all 6 open GitHub issues plus feature

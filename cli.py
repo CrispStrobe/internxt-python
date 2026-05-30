@@ -2016,7 +2016,7 @@ def trash_list(item_type: str, limit: int, as_json: bool):
         auth_service.get_auth_details()
 
         offset = 0
-        all_items = []
+        all_items: list = []
         while True:
             page_size = min(limit - len(all_items), 50)
             result = api_client.get_trash_content(offset=offset, limit=page_size,
