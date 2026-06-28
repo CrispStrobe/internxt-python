@@ -92,3 +92,51 @@ def test_generate_filename_encryption_iv_deterministic():
     assert iv1 == iv2
     iv3 = crypto_service.generate_filename_encryption_iv(bucket_key, "bid", "other.txt")
     assert iv3 != iv1
+
+
+# --- Login key generation (real OpenPGP keys, validated server-side) ---
+
+def test_generate_keys_shape():
+    """Login payload must carry ecc + kyber maps (server requires both)."""
+    keys = crypto_service.generate_keys("any-password")
+    assert isinstance(keys["publicKey"], str)
+    assert isinstance(keys["privateKeyEncrypted"], str)
+    assert isinstance(keys["ecc"], dict)
+    assert isinstance(keys["ecc"]["publicKey"], str)
+    assert isinstance(keys["ecc"]["privateKeyEncrypted"], str)
+    assert isinstance(keys["kyber"], dict)
+
+
+def test_generate_keys_public_key_is_base64_armored_openpgp():
+    """ecc.publicKey is base64 of an armored OpenPGP public key block."""
+    import base64
+    keys = crypto_service.generate_keys("pw")
+    armored = base64.b64decode(keys["ecc"]["publicKey"]).decode("utf-8")
+    assert armored.startswith("-----BEGIN PGP PUBLIC KEY BLOCK-----")
+
+
+def test_generate_keys_private_key_uses_internxt_gcm_envelope():
+    """privateKeyEncrypted is AES-256-GCM: base64(salt[64]+iv[16]+tag[16]+ct)."""
+    import base64
+    from config.config import config_service
+    keys = crypto_service.generate_keys("pw")
+    raw = base64.b64decode(keys["ecc"]["privateKeyEncrypted"])
+    assert len(raw) > 96
+    assert raw[:64].hex() == config_service.get("APP_MAGIC_SALT")
+    assert raw[64:80].hex() == config_service.get("APP_MAGIC_IV")
+
+
+def test_generate_keys_private_key_roundtrips():
+    """The encrypted private key decrypts back to an armored PGP private key."""
+    import base64
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes
+    password = "test-pass"
+    keys = crypto_service.generate_keys(password)
+    raw = base64.b64decode(keys["ecc"]["privateKeyEncrypted"])
+    salt, iv, tag, ct = raw[:64], raw[64:80], raw[80:96], raw[96:]
+    key = PBKDF2HMAC(algorithm=hashes.SHA512(), length=32, salt=salt,
+                     iterations=2145).derive(password.encode())
+    decrypted = AESGCM(key).decrypt(iv, ct + tag, None).decode("utf-8")
+    assert decrypted.startswith("-----BEGIN PGP PRIVATE KEY BLOCK-----")

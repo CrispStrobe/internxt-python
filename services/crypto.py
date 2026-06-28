@@ -9,6 +9,7 @@ import base64
 import hmac
 from typing import Tuple, Dict, Any, Optional
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
@@ -272,15 +273,87 @@ class CryptoService:
         hash_obj = self.pass_to_hash(password, salt)
         return self.encrypt_text(hash_obj['hash'])
 
+    def _internxt_aes_gcm_encrypt(self, text: str, password: str,
+                                  iv_hex: str, salt_hex: str, hops: int = 2145) -> str:
+        """
+        Replicates @internxt/lib `aes.encrypt(text, password, {iv, salt})`.
+
+        AES-256-GCM with a PBKDF2-SHA512 derived key (2145 iterations, 32 bytes).
+        Output layout (base64-encoded): salt[64] + iv[16] + authTag[16] + ciphertext.
+        The fixed iv/salt come from APP_MAGIC_IV / APP_MAGIC_SALT, matching the
+        official CLI's KeysService.encryptPrivateKey via CryptoUtils.getAesInit().
+        """
+        iv = bytes.fromhex(iv_hex)
+        salt = bytes.fromhex(salt_hex)
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA512(), length=32, salt=salt,
+                         iterations=hops, backend=self.backend)
+        key = kdf.derive(password.encode('utf-8'))
+        ciphertext_with_tag = AESGCM(key).encrypt(iv, text.encode('utf-8'), None)
+        ciphertext, tag = ciphertext_with_tag[:-16], ciphertext_with_tag[-16:]
+        return base64.b64encode(salt + iv + tag + ciphertext).decode('ascii')
+
     def generate_keys(self, password: str) -> Dict[str, Any]:
-        print("   ⚠️  Generating placeholder PGP keys for login payload.")
-        encrypted_pk = self.encrypt_text_with_key("placeholder-private-key-for-login", password)
+        """
+        Generates a real OpenPGP Ed25519 (legacy) keypair for the login payload.
+
+        Internxt's server now validates these keys ("keys.ecc.publicKey is not a
+        valid OpenPGP public key"), so placeholders are rejected. This mirrors the
+        official CLI's KeysService.generateNewKeysWithEncrypted: an EdDSA/Ed25519
+        primary key plus an ECDH/Curve25519 encryption subkey, with the public key
+        sent base64-encoded and the armored private key AES-256-GCM encrypted.
+
+        Fresh keys are generated on every login (as the official SDK does); the
+        server preserves any pre-existing account keys, so this is non-destructive.
+        """
+        try:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                import pgpy
+                from pgpy.constants import (
+                    PubKeyAlgorithm, KeyFlags, HashAlgorithm,
+                    SymmetricKeyAlgorithm, CompressionAlgorithm, EllipticCurveOID
+                )
+        except ImportError as e:
+            raise RuntimeError(
+                "PGPy is required to log in: Internxt now validates the OpenPGP keys "
+                "sent in the login payload. Install it with: pip install pgpy"
+            ) from e
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            # Primary signing/certifying key: EdDSA over Ed25519 (legacy format).
+            key = pgpy.PGPKey.new(PubKeyAlgorithm.EdDSA, EllipticCurveOID.Ed25519)
+            uid = pgpy.PGPUID.new('inxt@inxt.com')
+            key.add_uid(
+                uid,
+                usage={KeyFlags.Sign, KeyFlags.Certify},
+                hashes=[HashAlgorithm.SHA256],
+                ciphers=[SymmetricKeyAlgorithm.AES256],
+                compression=[CompressionAlgorithm.ZLIB],
+            )
+            # Encryption subkey: ECDH over Curve25519, matching openpgp.js ed25519Legacy.
+            subkey = pgpy.PGPKey.new(PubKeyAlgorithm.ECDH, EllipticCurveOID.Curve25519)
+            key.add_subkey(
+                subkey,
+                usage={KeyFlags.EncryptCommunications, KeyFlags.EncryptStorage},
+            )
+
+        private_key_armored = str(key)
+        public_key_armored = str(key.pubkey)
+
+        public_key_b64 = base64.b64encode(public_key_armored.encode('utf-8')).decode('ascii')
+        private_key_encrypted = self._internxt_aes_gcm_encrypt(
+            private_key_armored, password,
+            config_service.get('APP_MAGIC_IV'), config_service.get('APP_MAGIC_SALT')
+        )
+
         return {
-            "privateKeyEncrypted": encrypted_pk,
-            "publicKey": "placeholder-public-key-for-login",
-            "revocationCertificate": "placeholder-revocation-cert-for-login",
-            "ecc": { "publicKey": "placeholder-ecc-public-key", "privateKeyEncrypted": encrypted_pk },
-            "kyber": { "publicKey": None, "privateKeyEncrypted": None }
+            "privateKeyEncrypted": private_key_encrypted,
+            "publicKey": public_key_b64,
+            "revocationCertificate": "",
+            "ecc": {"publicKey": public_key_b64, "privateKeyEncrypted": private_key_encrypted},
+            "kyber": {"publicKey": None, "privateKeyEncrypted": None},
         }
 
 # Global instance

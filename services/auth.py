@@ -53,6 +53,7 @@ class AuthService:
 
         # Step 2: Client-side Crypto
         encrypted_password_hash = self.crypto.encrypt_password_hash(password, s_key)
+        print("   🔑 Generating OpenPGP login keys...")
         keys_payload = self.crypto.generate_keys(password)
 
         # Step 3: Access Call (SDK: loginAccess)

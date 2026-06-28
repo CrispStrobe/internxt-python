@@ -1,6 +1,8 @@
 # Core dependencies for Internxt CLI
 cryptography>=41.0.0
 mnemonic>=0.20
+# OpenPGP key generation for login (Internxt validates keys.ecc server-side)
+PGPy>=0.6.0
 requests>=2.31.0
 click>=8.1.0
 tqdm>=4.66.0
