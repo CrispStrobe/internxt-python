@@ -26,7 +26,7 @@ requirements = [
 
 setup(
     name="internxt-python-cli",        # ✅ Changed name to avoid conflicts
-    version="1.0.0",
+    version="1.1.0",
     author="Internxt Python CLI",
     author_email="hello@internxt.com",
     description="A Python CLI for Internxt encrypted cloud storage",
