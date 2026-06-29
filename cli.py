@@ -614,10 +614,12 @@ def move_path(paths: Tuple[str, ...], workers: int, on_conflict: str,
 @click.option('--exclude', multiple=True, help='Exclude files matching pattern (e.g., --exclude "*.tmp" --exclude ".DS_Store")')
 @click.option('--workers', '-w', type=int, default=4, show_default=True,
               help='Parallel upload workers for batch directory uploads (1 = serial)')
+@click.option('--chunk-workers', type=int, default=4, show_default=True,
+              help='Parallel multipart part PUTs within a single large file (1 = serial)')
 @click.option('--verbose', '-v', is_flag=True, help='Show verbose output')
 def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_conflict: str,
            preserve_timestamps: bool, include: Tuple[str, ...], exclude: Tuple[str, ...],
-           workers: int, verbose: bool):
+           workers: int, chunk_workers: int, verbose: bool):
     """
     Encrypts and uploads local files/folders to a remote path.
 
@@ -654,6 +656,9 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
             click.echo(f"🔍 Include filters: {', '.join(include_patterns)}")
         if exclude_patterns:
             click.echo(f"🚫 Exclude filters: {', '.join(exclude_patterns)}")
+
+    # Within-file multipart concurrency for single large files (>= 100 MiB).
+    drive_service.chunk_workers = max(1, chunk_workers)
 
     try:
         click.echo("🔄 Refreshing authentication token...")

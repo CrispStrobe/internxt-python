@@ -9,6 +9,7 @@ import sys
 import math
 import hashlib
 import fnmatch
+import concurrent.futures
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from tqdm import tqdm
@@ -59,6 +60,12 @@ class DriveService:
         self.MULTIPART_MIN_SIZE = 100 * 1024 * 1024       # server multipart floor
         self.UPLOAD_PART_SIZE = 30 * 1024 * 1024          # 30MB parts
         self.MAX_MULTIPARTS = 10000                       # server part-count ceiling
+        # Within-file concurrency: how many multipart part PUTs may be in
+        # flight at once for a SINGLE large file. The CTR keystream + content
+        # hash stay strictly sequential in the producer; only the network PUTs
+        # run in parallel. Bytes in flight are additionally bounded by the
+        # memory gate (_mem_acquire). Overridable per-run (cli --chunk-workers).
+        self.chunk_workers = 4
 
         # Memory-gated concurrency: only allow as many simultaneous
         # read+encrypt operations as fit in available RAM.  The semaphore
@@ -229,34 +236,76 @@ class DriveService:
             if not single_url:
                 raise ValueError("Server did not return an upload URL")
 
-        parts_manifest = []
+        # Multipart parts finish out of order, so we pre-size the manifest and
+        # assign each ETag BY INDEX. The crypto (encryptor.update + sha.update)
+        # stays strictly sequential in this producer thread; only the network
+        # PUTs are dispatched to a bounded worker pool.
+        n_workers = max(1, min(self.chunk_workers, parts)) if use_multipart else 1
+        parts_manifest: List[Optional[Dict[str, Any]]] = [None] * parts
         bytes_done = 0
-        with open(file_path, 'rb') as f, tqdm(
-                total=file_size, unit='B', unit_scale=True, desc='        Uploading',
-                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}] ETA: {remaining}',
-                leave=False) as pbar:
-            for part_index in range(parts):
-                remaining = file_size - bytes_done
-                read_size = remaining if not use_multipart else min(part_size, remaining)
-                plaintext = f.read(read_size)
-                if not plaintext and remaining > 0:
-                    raise IOError(f"Unexpected EOF reading {file_path} at offset {bytes_done}")
-                ciphertext = encryptor.update(plaintext)
-                sha.update(ciphertext)
-                bytes_done += len(plaintext)
 
-                if use_multipart:
-                    assert urls is not None  # validated above when use_multipart
-                    part_url = urls[part_index]
-                    etag = self._put_with_retry(
-                        lambda url=part_url, data=ciphertext: self.api.upload_part(url, data, timeout_seconds),
-                        part_index + 1, parts)
-                    parts_manifest.append({'PartNumber': part_index + 1, 'ETag': etag})
-                else:
-                    self._put_with_retry(
-                        lambda data=ciphertext: self.api.upload_chunk(single_url, data),
-                        1, 1)
-                pbar.update(len(plaintext))
+        # Failures from worker threads are collected here and surfaced after
+        # join (the producer also stops dispatching once one is seen).
+        part_errors: List[Tuple[int, BaseException]] = []
+        errors_lock = threading.Lock()
+        # Cap parts in flight to n_workers (each ~part_size); _mem_acquire adds
+        # the RAM ceiling on bytes in flight.
+        inflight = threading.BoundedSemaphore(n_workers)
+
+        def _put_part(idx: int, url: str, data: bytes) -> None:
+            try:
+                etag = self._put_with_retry(
+                    lambda: self.api.upload_part(url, data, timeout_seconds),
+                    idx + 1, parts)
+                parts_manifest[idx] = {'PartNumber': idx + 1, 'ETag': etag}
+            except BaseException as e:  # noqa: BLE001 — re-raised by the producer after join
+                with errors_lock:
+                    part_errors.append((idx, e))
+            finally:
+                self._mem_release(len(data))
+                inflight.release()
+
+        executor = (concurrent.futures.ThreadPoolExecutor(max_workers=n_workers)
+                    if use_multipart else None)
+        try:
+            with open(file_path, 'rb') as f, tqdm(
+                    total=file_size, unit='B', unit_scale=True, desc='        Uploading',
+                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}] ETA: {remaining}',
+                    leave=False) as pbar:
+                for part_index in range(parts):
+                    # Stop the producer early if a dispatched part already failed.
+                    with errors_lock:
+                        if part_errors:
+                            break
+                    remaining = file_size - bytes_done
+                    read_size = remaining if not use_multipart else min(part_size, remaining)
+                    plaintext = f.read(read_size)
+                    if not plaintext and remaining > 0:
+                        raise IOError(f"Unexpected EOF reading {file_path} at offset {bytes_done}")
+                    ciphertext = encryptor.update(plaintext)
+                    sha.update(ciphertext)
+                    bytes_done += len(plaintext)
+
+                    if use_multipart:
+                        assert urls is not None and executor is not None  # validated above
+                        # Reserve a slot (≤ n_workers in flight) and RAM for this
+                        # part before handing the PUT off to a worker thread.
+                        inflight.acquire()
+                        self._mem_acquire(len(ciphertext))
+                        executor.submit(_put_part, part_index, urls[part_index], ciphertext)
+                    else:
+                        self._put_with_retry(
+                            lambda data=ciphertext: self.api.upload_chunk(single_url, data),
+                            1, 1)
+                    pbar.update(len(plaintext))
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
+
+        if part_errors:
+            part_errors.sort(key=lambda t: t[0])
+            idx, err = part_errors[0]
+            raise Exception(f"Multipart upload failed on part {idx + 1}/{parts}: {err}")
 
         # AES-CTR has no padding, so finalize() is normally empty; fold it in anyway.
         tail = encryptor.finalize()
@@ -992,15 +1041,25 @@ class DriveService:
         # Streaming encrypt+upload: RAM is bounded by the part size (~30 MB),
         # not the file size, so even multi-GB files no longer OOM. Reserve a
         # small headroom so concurrent workers don't oversubscribe memory.
+        #
+        # Multipart (>= 100 MiB) files gate their parts INDIVIDUALLY inside
+        # _perform_network_upload (the parallel per-part path). The gate is
+        # process-wide and non-reentrant, so we must NOT also hold an outer
+        # reservation here for those files — it would deadlock the per-part
+        # acquires against this one. Single-PUT (small) files have no internal
+        # gate, so they reserve here.
+        use_internal_gate = file_size >= self.MULTIPART_MIN_SIZE
         mem_need = self.UPLOAD_PART_SIZE * 2
-        self._mem_acquire(mem_need)
+        if not use_internal_gate:
+            self._mem_acquire(mem_need)
         start_total = time.time()
         try:
             network_file_id = self._perform_network_upload(
                 file_path, file_size, bucket_id, mnemonic, network_auth, timeout_seconds
             )
         finally:
-            self._mem_release(mem_need)
+            if not use_internal_gate:
+                self._mem_release(mem_need)
 
         print(f"     ✅ Network upload complete (file id: {network_file_id})")
 

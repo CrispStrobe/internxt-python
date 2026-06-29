@@ -67,7 +67,30 @@ Internxt differs from Filen: **AES-CTR, one continuous keystream** (encryption
 is inherently sequential — like a running hash), and **S3** storage (multipart
 parts on upload; a single presigned object on download).
 
-## Step A — parallel multipart part uploads ⬜ TODO
+## Step A — parallel multipart part uploads ✅ DONE
+**Implemented** (`services/drive.py` `_perform_network_upload`). The producer
+reads each 30 MB part and runs `encryptor.update` + `sha.update` strictly in
+order, then dispatches the part PUT to a bounded
+`ThreadPoolExecutor(max_workers=self.chunk_workers)` (default 4; CLI
+`upload --chunk-workers N` sets `DriveService.chunk_workers`). A
+`BoundedSemaphore(n_workers)` caps parts in flight and `_mem_acquire`/
+`_mem_release` add the RAM ceiling on bytes in flight; each worker writes its
+ETag to `parts_manifest[part_index]` BY INDEX (pre-sized list). A failed part is
+collected under a lock, stops the producer, and is re-raised after
+`executor.shutdown(wait=True)`. Files < 100 MiB stay on the single-PUT
+sequential path. Unit tests: `tests/test_chunk_concurrency.py` (peak in-flight ≤
+N, manifest ordered under out-of-order completion, hash identical under
+concurrency, in-flight bytes bounded by the gate, failing part surfaced).
+
+NOTE — gate nesting: `upload_file_to_folder` used to hold an outer
+`_mem_acquire(UPLOAD_PART_SIZE*2)` across the whole call. Since the per-part
+gating now lives inside `_perform_network_upload`, that outer hold is skipped
+for multipart files (`file_size >= MULTIPART_MIN_SIZE`) — the gate is global and
+non-reentrant, so holding it outside while the per-part acquires run inside
+would deadlock. Small (single-PUT) files still reserve at the outer level.
+Verified live: 110 MB multipart upload round-trips byte-exact.
+
+Original plan (kept for reference):
 `services/drive.py` → `_perform_network_upload` (~line 185): the sequential
 `for part_index in range(parts):` loop (~238) that encrypts a 30 MB part
 (`encryptor.update`), updates `sha`, and PUTs it via
@@ -122,6 +145,11 @@ CONSTRAINTS:
 ## Tests (unit hermetic + live)
 Unit (mock `utils/api.py` PUT/GET): assert peak in-flight ≤ N; manifest ordered;
 seekable-CTR decrypt reproduces plaintext; small files stay sequential.
+- [x] upload: peak parts in flight ≤ N (`test_chunk_concurrency.py`)
+- [x] upload: `parts_manifest` ordered by PartNumber under out-of-order completion
+- [x] small files (<100 MiB) stay single-PUT
+- [x] memory: in-flight bytes bounded by the gate's budget
+- [ ] (Step B) seekable-CTR decrypt of an arbitrary aligned offset == plaintext
 Live (mirror `tests/test_live_smoke.py` skip gate; confine to a temp folder, clean up):
 - [ ] ≥100 MB upload: byte-exact round-trip + faster than the sequential baseline
 - [ ] interrupted multipart upload resumes (checkpoint) and completes
