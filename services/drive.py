@@ -67,6 +67,18 @@ class DriveService:
         # memory gate (_mem_acquire). Overridable per-run (cli --chunk-workers).
         self.chunk_workers = 4
 
+        # Step B — parallel ranged downloads (opt-in, riskier). When enabled and
+        # the file is large enough, a single presigned S3 GET is split into N
+        # 16-byte-aligned ranges fetched concurrently and CTR-decrypted at their
+        # offsets (AES-CTR is seekable). Falls back to the sequential
+        # single-stream path if the server ignores Range (200 not 206) or the
+        # file is small. Toggled per-run by cli `download --ranged`.
+        self.ranged_download = False
+        self.DOWNLOAD_PART_SIZE = 30 * 1024 * 1024        # 30MB ranges (16-aligned)
+        # Only bother parallelising downloads above this size (one extra probe
+        # round-trip isn't worth it for small files).
+        self.RANGED_DOWNLOAD_MIN_SIZE = 100 * 1024 * 1024
+
         # Memory-gated concurrency: only allow as many simultaneous
         # read+encrypt operations as fit in available RAM.  The semaphore
         # value is computed lazily per-file based on current free memory.
@@ -1672,7 +1684,127 @@ class DriveService:
             traceback.print_exc()
             return "error"
 
-    def download_file(self, file_uuid: str, destination_path_str: str, 
+    class _RangeNotSupported(Exception):
+        """Raised when the S3 endpoint answers a ranged GET with 200 (whole
+        object) instead of 206 — the caller falls back to a single stream."""
+
+    def _download_sequential(self, download_url: str, file_size: int, mnemonic: str,
+                             bucket_id: str, file_index_hex: str,
+                             destination_path: Path, timeout_seconds: int) -> int:
+        """Stream one presigned GET and CTR-decrypt to disk; return bytes written."""
+        decryptor = self.crypto.new_download_decryptor(mnemonic, bucket_id, file_index_hex)
+        DL_CHUNK = 4 * 1024 * 1024
+        written = 0
+        with self.api.download_stream(download_url, timeout=timeout_seconds) as resp, \
+                open(destination_path, 'wb') as out, \
+                tqdm(total=file_size, unit='B', unit_scale=True, desc='        Progress',
+                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}] ETA: {remaining}',
+                     leave=False) as dbar:
+            for enc_chunk in resp.iter_content(chunk_size=DL_CHUNK):
+                if not enc_chunk:
+                    continue
+                plain = decryptor.update(enc_chunk)
+                # Defensively trim so we never write past the real file size.
+                if written + len(plain) > file_size:
+                    plain = plain[:file_size - written]
+                if plain:
+                    out.write(plain)
+                    written += len(plain)
+                dbar.update(len(enc_chunk))
+            tail = decryptor.finalize()
+            if tail and written < file_size:
+                tail = tail[:file_size - written]
+                out.write(tail)
+                written += len(tail)
+        return written
+
+    def _download_ranged(self, download_url: str, file_size: int, mnemonic: str,
+                         bucket_id: str, file_index_hex: str, destination_path: Path,
+                         timeout_seconds: int, n_workers: int) -> int:
+        """Fetch the file as N 16-byte-aligned ranges concurrently, CTR-decrypt
+        each at its offset, and write it positionally; return bytes written.
+
+        AES-CTR is seekable, so each range decrypts independently of the others.
+        Ranges finish out of order but are written at their byte offset under a
+        lock, so the result is byte-identical to the sequential path. Bytes in
+        flight are bounded by both the worker pool and the memory gate. Raises
+        ``_RangeNotSupported`` if the server ignores Range (200 not 206), so the
+        caller can fall back to a single stream.
+        """
+        part_size = self.DOWNLOAD_PART_SIZE  # 30 MB, a multiple of 16
+        n_parts = math.ceil(file_size / part_size)
+        print(f"        Ranged download: {n_parts} range(s) of {self._format_size(part_size)}")
+
+        # Cheap 1-byte probe: bail out to the sequential path before doing any
+        # real work if the endpoint doesn't honour Range.
+        probe_status, _ = self.api.download_range(download_url, 0, 0, timeout_seconds)
+        if probe_status != 206:
+            raise self._RangeNotSupported()
+
+        errors: List[Tuple[int, BaseException]] = []
+        errors_lock = threading.Lock()
+        write_lock = threading.Lock()
+        inflight = threading.BoundedSemaphore(n_workers)
+        written_total = 0
+
+        with open(destination_path, 'wb') as out, tqdm(
+                total=file_size, unit='B', unit_scale=True, desc='        Progress',
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}] ETA: {remaining}',
+                leave=False) as dbar:
+            out.truncate(file_size)
+
+            def _fetch_range(idx: int) -> int:
+                nonlocal written_total
+                start = idx * part_size
+                end = min(start + part_size, file_size) - 1
+                length = end - start + 1
+                try:
+                    status, content = self.api.download_range(
+                        download_url, start, end, timeout_seconds)
+                    if status != 206:
+                        raise self._RangeNotSupported()
+                    decryptor = self.crypto.new_download_decryptor_at(
+                        mnemonic, bucket_id, file_index_hex, start)
+                    plain = decryptor.update(content) + decryptor.finalize()
+                    if len(plain) > length:
+                        plain = plain[:length]
+                    with write_lock:
+                        out.seek(start)
+                        out.write(plain)
+                        written_total += len(plain)
+                    dbar.update(length)
+                    return len(plain)
+                except BaseException as e:  # noqa: BLE001 — surfaced after join
+                    with errors_lock:
+                        errors.append((idx, e))
+                    return 0
+                finally:
+                    self._mem_release(length)
+                    inflight.release()
+
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=n_workers)
+            try:
+                for idx in range(n_parts):
+                    with errors_lock:
+                        if errors:
+                            break
+                    start = idx * part_size
+                    end = min(start + part_size, file_size) - 1
+                    inflight.acquire()
+                    self._mem_acquire(end - start + 1)
+                    executor.submit(_fetch_range, idx)
+            finally:
+                executor.shutdown(wait=True)
+
+        if errors:
+            errors.sort(key=lambda t: t[0])
+            idx, err = errors[0]
+            if isinstance(err, self._RangeNotSupported):
+                raise err  # trigger the sequential fallback
+            raise Exception(f"Ranged download failed on range {idx + 1}/{n_parts}: {err}")
+        return written_total
+
+    def download_file(self, file_uuid: str, destination_path_str: str,
                     preserve_timestamps: bool = False):
         """Download and decrypt file with optional timestamp preservation"""
         credentials = self.auth.get_auth_details()
@@ -1724,36 +1856,33 @@ class DriveService:
             if destination_path.is_dir():
                 destination_path = destination_path / file_name
 
-            # Stream-download and decrypt directly to disk, a few MB at a time,
-            # so RAM stays bounded regardless of file size (AES-CTR decrypts
-            # incrementally). This replaces the old read-whole-file approach
-            # that OOM'd on large downloads.
+            # Stream-download and decrypt directly to disk so RAM stays bounded
+            # regardless of file size (AES-CTR decrypts incrementally). When
+            # ranged downloads are enabled and the file is large, split it into
+            # N 16-byte-aligned ranges fetched concurrently (each CTR-decrypted
+            # at its offset); otherwise — and on a Range-unsupported server —
+            # use one sequential stream.
             pbar.set_description("☁️  Downloading + decrypting")
             timeout_seconds = max(300, int(file_size / (100 * 1024)) + 60)
-            decryptor = self.crypto.new_download_decryptor(mnemonic, bucket_id, file_index_hex)
-            DL_CHUNK = 4 * 1024 * 1024
+            use_ranged = (self.ranged_download
+                          and file_size >= self.RANGED_DOWNLOAD_MIN_SIZE)
             written = 0
-            with self.api.download_stream(download_url, timeout=timeout_seconds) as resp, \
-                    open(destination_path, 'wb') as out, \
-                    tqdm(total=file_size, unit='B', unit_scale=True, desc='        Progress',
-                         bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}] ETA: {remaining}',
-                         leave=False) as dbar:
-                for enc_chunk in resp.iter_content(chunk_size=DL_CHUNK):
-                    if not enc_chunk:
-                        continue
-                    plain = decryptor.update(enc_chunk)
-                    # Defensively trim so we never write past the real file size.
-                    if written + len(plain) > file_size:
-                        plain = plain[:file_size - written]
-                    if plain:
-                        out.write(plain)
-                        written += len(plain)
-                    dbar.update(len(enc_chunk))
-                tail = decryptor.finalize()
-                if tail and written < file_size:
-                    tail = tail[:file_size - written]
-                    out.write(tail)
-                    written += len(tail)
+            if use_ranged:
+                try:
+                    written = self._download_ranged(
+                        download_url, file_size, mnemonic, bucket_id,
+                        file_index_hex, destination_path, timeout_seconds,
+                        max(1, self.chunk_workers))
+                except self._RangeNotSupported:
+                    print("     ↩️  Server ignored Range (HTTP 200) — "
+                          "falling back to a single sequential stream")
+                    written = self._download_sequential(
+                        download_url, file_size, mnemonic, bucket_id,
+                        file_index_hex, destination_path, timeout_seconds)
+            else:
+                written = self._download_sequential(
+                    download_url, file_size, mnemonic, bucket_id,
+                    file_index_hex, destination_path, timeout_seconds)
             print(f"     ☁️  Downloaded + decrypted {self._format_size(written)} to disk")
             print(f"     💾 Saved to: {destination_path}")
             pbar.update(3)  # collapses the old download / decrypt / save steps

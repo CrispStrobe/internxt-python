@@ -1255,9 +1255,16 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
 @click.option('--destination', '-d', type=click.Path(file_okay=True, writable=True, resolve_path=True), default='.', help='Where to save the file')
 @click.option('--preserve-timestamps', '-p', is_flag=True, help='Preserve file modification times')
 @click.option('--on-conflict', type=click.Choice(['overwrite', 'skip'], case_sensitive=False), default='overwrite', help='Action if local file exists')
+@click.option('--ranged/--no-ranged', default=False, show_default=True,
+              help='Fetch large files (>=100 MiB) as parallel byte ranges (falls back to a single stream if the server ignores Range)')
+@click.option('--chunk-workers', type=int, default=4, show_default=True,
+              help='Parallel ranged-download workers within a single large file')
 @click.option('--verbose', '-v', is_flag=True, help='Show verbose output')
-def download(file_uuid: str, destination: str, preserve_timestamps: bool, on_conflict: str, verbose: bool):
+def download(file_uuid: str, destination: str, preserve_timestamps: bool, on_conflict: str,
+             ranged: bool, chunk_workers: int, verbose: bool):
     """Downloads and decrypts a file from your Internxt Drive (by UUID)"""
+    drive_service.ranged_download = ranged
+    drive_service.chunk_workers = max(1, chunk_workers)
     try:
         if verbose:
             click.echo(f"📥 Downloading file with UUID: {file_uuid}")
@@ -1459,9 +1466,14 @@ def list_path(path: str, detailed: bool, show_all: bool, json_out: bool):
 @click.option('--preserve-timestamps', '-p', is_flag=True, help='Preserve file modification times')
 @click.option('--include', multiple=True, help='Include only files matching pattern')
 @click.option('--exclude', multiple=True, help='Exclude files matching pattern')
+@click.option('--ranged/--no-ranged', default=False, show_default=True,
+              help='Fetch large files (>=100 MiB) as parallel byte ranges (falls back to a single stream if the server ignores Range)')
+@click.option('--chunk-workers', type=int, default=4, show_default=True,
+              help='Parallel ranged-download workers within a single large file')
 @click.option('--verbose', '-v', is_flag=True, help='Show verbose output')
 def download_path(path: str, destination: Optional[str], recursive: bool, on_conflict: str,
-                  preserve_timestamps: bool, include: Tuple[str], exclude: Tuple[str], verbose: bool):
+                  preserve_timestamps: bool, include: Tuple[str], exclude: Tuple[str],
+                  ranged: bool, chunk_workers: int, verbose: bool):
     """
     Download a file or folder by its path.
     
@@ -1478,6 +1490,8 @@ def download_path(path: str, destination: Optional[str], recursive: bool, on_con
       With timestamp preservation:
         python cli.py download-path "/Backup" -r -p
     """
+    drive_service.ranged_download = ranged
+    drive_service.chunk_workers = max(1, chunk_workers)
     try:
         auth_service.get_auth_details()
         

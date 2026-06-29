@@ -448,6 +448,31 @@ def test_live_multipart_upload_round_trip(authed_session, sentinel_folder, tmp_p
     assert downloaded == payload, "Multipart round-trip data mismatch"
     print(f"✅ LIVE: Multipart round-trip integrity OK ({drive._format_size(size)})")
 
+    # Step B — re-download the SAME object with parallel ranged GETs and verify
+    # it is byte-identical (no extra upload quota). Falls back internally if the
+    # presigned URL ignores Range.
+    ranged_dir = tmp_path / "downloads_ranged"
+    ranged_dir.mkdir()
+    saved_ranged = drive.ranged_download
+    drive.ranged_download = True
+    try:
+        ranged_out = None
+        for _attempt in range(4):
+            try:
+                ranged_out = drive.download_file(uploaded['uuid'], str(ranged_dir))
+                break
+            except Exception as exc:
+                if 'not found' in str(exc).lower() and _attempt < 3:
+                    time.sleep(3)
+                    continue
+                raise
+    finally:
+        drive.ranged_download = saved_ranged
+    assert ranged_out is not None
+    ranged_bytes = Path(ranged_out).read_bytes()
+    assert ranged_bytes == payload, "Ranged download data mismatch"
+    print(f"✅ LIVE: Ranged-download round-trip integrity OK ({drive._format_size(size)})")
+
 
 # =============================================================================
 # PATH RESOLUTION + LISTING

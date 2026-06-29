@@ -224,6 +224,28 @@ class CryptoService:
         cipher = Cipher(algorithms.AES(file_key), modes.CTR(iv), backend=self.backend)
         return cipher.decryptor()
 
+    def new_download_decryptor_at(self, mnemonic: str, bucket_id: str,
+                                  file_index_hex: str, offset: int) -> Any:
+        """
+        Create an AES-256-CTR decryptor whose keystream is positioned at a
+        16-byte-aligned byte ``offset`` into the file.
+
+        AES-CTR is seekable: the counter block for byte offset O is
+        ``initial_counter + O // 16`` (the 16-byte IV interpreted as a 128-bit
+        big-endian integer, advanced by O/16 blocks, with 128-bit wraparound).
+        This lets each ranged-download worker decrypt its slice independently of
+        the others. ``offset`` MUST be a multiple of 16 (the AES block size).
+        """
+        if offset % 16 != 0:
+            raise ValueError(f"CTR seek offset must be 16-byte aligned, got {offset}")
+        index = bytes.fromhex(file_index_hex)
+        file_key = self.generate_file_key(mnemonic, bucket_id, index)
+        iv = index[:16]
+        counter = (int.from_bytes(iv, 'big') + (offset // 16)) & ((1 << 128) - 1)
+        seeked_iv = counter.to_bytes(16, 'big')
+        cipher = Cipher(algorithms.AES(file_key), modes.CTR(seeked_iv), backend=self.backend)
+        return cipher.decryptor()
+
     def decrypt_stream_internxt_protocol(self, encrypted_data: bytes, mnemonic: str,
                                        bucket_id: str, file_index_hex: str) -> bytes:
         """

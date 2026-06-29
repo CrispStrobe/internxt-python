@@ -121,7 +121,26 @@ CONSTRAINTS — do NOT just flip the loop:
 
 Win is the single-large-file case (batch is already file-parallel).
 
-## Step B — parallel ranged downloads ⬜ TODO (riskier; gate behind a flag)
+## Step B — parallel ranged downloads ✅ DONE (opt-in via `--ranged`)
+**Implemented.** `services/drive.py` `download_file` now dispatches to
+`_download_ranged` when `self.ranged_download` is on (cli `download --ranged` /
+`download-path --ranged`) and the file is ≥ `RANGED_DOWNLOAD_MIN_SIZE` (100 MiB);
+otherwise (and on a Range-unsupported server) it uses `_download_sequential`
+(the old single-stream path, factored out). `_download_ranged` does a cheap
+1-byte probe (`api.download_range`, `utils/api.py`) — raising
+`_RangeNotSupported` → sequential fallback on a 200 — then splits the file into
+`DOWNLOAD_PART_SIZE` (30 MB, 16-aligned) ranges fetched through a bounded
+`ThreadPoolExecutor(chunk_workers)` + `BoundedSemaphore` + the `_mem_acquire`
+gate. Each range is decrypted independently with
+`crypto.new_download_decryptor_at(mnemonic, bucket_id, file_index_hex, offset)`
+— AES-CTR is seekable, counter = IV + offset/16 (128-bit wrap) — and written at
+its byte offset under a lock (ranges finish out of order, file is byte-identical).
+A failed range is surfaced after `executor.shutdown(wait=True)`. Unit tests:
+`tests/test_ranged_download.py` (seekable-CTR == plaintext at arbitrary aligned
+offsets + reassembly; byte-exact round-trip; peak in-flight ≤ N; out-of-order
+write-by-offset; 200→sequential fallback; small/disabled stay single-stream).
+
+Original plan (kept for reference):
 `services/drive.py` → `download_file` (~line 1616): today one
 `api.download_stream(url)` (`utils/api.py:461`) over a single presigned S3 URL
 (`api.get_download_links(...)['shards'][0]['url']`), streamed + CTR-decrypted to
@@ -147,9 +166,10 @@ Unit (mock `utils/api.py` PUT/GET): assert peak in-flight ≤ N; manifest ordere
 seekable-CTR decrypt reproduces plaintext; small files stay sequential.
 - [x] upload: peak parts in flight ≤ N (`test_chunk_concurrency.py`)
 - [x] upload: `parts_manifest` ordered by PartNumber under out-of-order completion
-- [x] small files (<100 MiB) stay single-PUT
+- [x] small files (<100 MiB) stay single-PUT; non-Range downloads stay single-GET
 - [x] memory: in-flight bytes bounded by the gate's budget
-- [ ] (Step B) seekable-CTR decrypt of an arbitrary aligned offset == plaintext
+- [x] seekable-CTR decrypt of an arbitrary aligned offset == plaintext (`test_ranged_download.py`)
+- [x] ranged download byte-exact + peak ranges in flight ≤ N + 200→sequential fallback
 Live (mirror `tests/test_live_smoke.py` skip gate; confine to a temp folder, clean up):
 - [ ] ≥100 MB upload: byte-exact round-trip + faster than the sequential baseline
 - [ ] interrupted multipart upload resumes (checkpoint) and completes

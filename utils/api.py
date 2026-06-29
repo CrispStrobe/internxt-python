@@ -458,6 +458,22 @@ class ApiClient:
         response.raise_for_status()
         return response.content
 
+    def download_range(self, download_url: str, start: int, end: int,
+                       timeout: int = 300) -> tuple:
+        """
+        GET a byte range ``[start, end]`` (inclusive) from a pre-signed S3 URL.
+
+        Sends ``Range: bytes=start-end``. Returns ``(status_code, content)``.
+        S3 answers 206 (Partial Content) with just the range; a server that
+        ignores Range answers 200 with the whole object — the caller checks the
+        status and falls back to a single sequential stream on 200. No auth is
+        needed for a pre-signed URL.
+        """
+        headers = {'Range': f'bytes={start}-{end}'}
+        response = requests.get(download_url, headers=headers, timeout=timeout)
+        response.raise_for_status()
+        return response.status_code, response.content
+
     def download_stream(self, download_url: str, timeout: int = 300) -> requests.Response:
         """
         Open a streaming GET for a download. Returns the raw streaming
