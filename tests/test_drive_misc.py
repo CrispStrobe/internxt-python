@@ -10,6 +10,27 @@ import pytest
 from services.drive import drive_service
 
 
+class _FakeStream:
+    """Minimal stand-in for a streaming requests.Response (download_stream)."""
+
+    def __init__(self, data):
+        self._data = data
+
+    def iter_content(self, chunk_size=None):
+        cs = chunk_size or (4 * 1024 * 1024)
+        for i in range(0, len(self._data), cs):
+            yield self._data[i:i + cs]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def close(self):
+        pass
+
+
 @pytest.fixture(autouse=True)
 def _reset():
     drive_service.folder_content_cache.clear()
@@ -145,7 +166,8 @@ def test_download_file_creation_time_warning_branch(tmp_path):
                       return_value=metadata), \
          patch.object(drive_service.api, 'get_download_links',
                       return_value={'shards': [{'url': 'u'}], 'index': idx_hex}), \
-         patch.object(drive_service.api, 'download_chunk', return_value=enc):
+         patch.object(drive_service.api, 'download_stream',
+                      side_effect=lambda url, timeout=300: _FakeStream(enc)):
         out_path = drive_service.download_file('fid', str(out_dir),
                                                preserve_timestamps=True)
     # File downloaded successfully despite no modification time

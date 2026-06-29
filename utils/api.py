@@ -398,16 +398,20 @@ class ApiClient:
     def start_upload(self, bucket_id: str, file_size: int, auth: tuple,
                      parts: int = 1, chunk_size: int = 0) -> Dict[str, Any]:
         """
-        Gets upload URLs for a file.
+        Gets upload URL(s) for a file.
 
-        The Internxt network API always uses multiparts=1 (single pre-signed
-        URL). The *parts* and *chunk_size* parameters are accepted for
-        forward compatibility but currently ignored — the server returns
-        one upload URL regardless.
+        With ``parts == 1`` the server returns a single pre-signed PUT URL
+        (``uploads[0].url``). With ``parts > 1`` (multipart, file must be
+        >= 100 MiB) it returns one pre-signed URL per part in
+        ``uploads[0].urls`` plus an S3 ``UploadId``. The request body always
+        carries a single entry with ``index: 0`` and the whole file size; the
+        split is signalled only by the ``multiparts`` query parameter.
 
-        Real SDK: POST /v2/buckets/{bucketId}/files/start?multiparts=1
+        Real SDK: POST /v2/buckets/{bucketId}/files/start?multiparts={parts}
         """
-        url = f"{self.network_url}/v2/buckets/{bucket_id}/files/start?multiparts=1"
+        if parts < 1:
+            parts = 1
+        url = f"{self.network_url}/v2/buckets/{bucket_id}/files/start?multiparts={parts}"
         data = {'uploads': [{'index': 0, 'size': file_size}]}
         return self.post(url, data, auth=auth)
 
@@ -415,6 +419,21 @@ class ApiClient:
         """Uploads a raw chunk of data using PUT. No auth needed for pre-signed URL."""
         response = requests.put(upload_url, data=chunk_data, headers={'Content-Type': 'application/octet-stream'}, timeout=300)
         response.raise_for_status()
+
+    def upload_part(self, upload_url: str, data, timeout: int = 300) -> str:
+        """
+        PUT a single multipart part to its pre-signed S3 URL and return the
+        ETag from the response. *data* may be raw bytes or a streaming
+        iterable/generator. No auth needed for a pre-signed URL.
+        """
+        response = requests.put(
+            upload_url, data=data,
+            headers={'Content-Type': 'application/octet-stream'},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        etag = response.headers.get('ETag') or response.headers.get('etag') or ''
+        return etag.strip('"')
 
     def finish_upload(self, bucket_id: str, payload: Dict[str, Any], auth: tuple) -> Dict[str, Any]:
         """
@@ -438,6 +457,16 @@ class ApiClient:
         response = requests.get(download_url, timeout=300)
         response.raise_for_status()
         return response.content
+
+    def download_stream(self, download_url: str, timeout: int = 300) -> requests.Response:
+        """
+        Open a streaming GET for a download. Returns the raw streaming
+        Response; the caller must iterate ``.iter_content(...)`` and close it
+        (a ``with`` block works). No auth needed for a pre-signed URL.
+        """
+        response = requests.get(download_url, stream=True, timeout=timeout)
+        response.raise_for_status()
+        return response
 
     # ========== FILE OPERATIONS ==========
     

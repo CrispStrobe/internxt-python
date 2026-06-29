@@ -4,22 +4,19 @@ Forward-looking items. For completed work see [`HISTORY.md`](HISTORY.md).
 
 ---
 
-## Server-side multipart upload
+## ~~Server-side multipart upload~~ — DONE (2026-06-29)
 
-The Internxt network API (`/v2/buckets/{id}/files/start`) only supports
-`multiparts=1` — a single pre-signed URL per upload. Attempts to request
-multiple URLs (`multiparts=N`, N>1) return HTTP 400. True multipart
-upload (splitting large files across multiple URLs/shards) would require
-backend support that doesn't exist today.
+This was previously believed impossible (the note here claimed
+`multiparts=N`, N>1 returns HTTP 400). That was **wrong**: reading
+Internxt's own repos and testing live showed the network API fully
+supports multipart for files ≥ 100 MiB. Implemented — see the HISTORY.md
+entry "Large-file uploads: streaming + true multipart + streaming
+download". Uploads now stream-encrypt (RAM bounded by part size), use
+true S3 multipart with per-part retry, and store the protocol-correct
+`ripemd160(sha256)` shard hash; downloads stream-decrypt to disk.
 
-The current upload path handles large files via streaming progress
-(`_upload_chunk_with_progress` sends in 1 MB sub-pieces for tqdm) and
-dynamic timeouts based on file size. This works for files up to several
-GB on reasonably fast connections.
-
-**If the backend adds multipart support later:** The `MULTIPART_THRESHOLD`
-and `CHUNK_SIZE` constants in `drive.py` and the `parts`/`chunk_size`
-parameters in `api.start_upload` are ready to wire up.
+Possible follow-ups: concurrent part PUTs (currently sequential), and
+resumable uploads across process restarts (re-using the same `UploadId`).
 
 ---
 
@@ -41,6 +38,7 @@ to become queryable). The retry pattern is applied to:
 - `test_live_upload_extensionless_file`
 - `test_live_file_move_between_folders`
 - `test_live_large_file_upload_round_trip`
+- `test_live_multipart_upload_round_trip` (also skippable via `IXT_SKIP_MULTIPART=1`)
 
 ### Minimum-Python audit
 

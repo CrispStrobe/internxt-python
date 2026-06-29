@@ -6,6 +6,53 @@ retrospective lessons see [`LEARNINGS.md`](LEARNINGS.md).
 
 ---
 
+## Large-file uploads: streaming + true multipart + streaming download (2026-06-29)
+
+Addresses [issue #5](https://github.com/CrispStrobe/internxt-python/issues/5)
+("Uploading big files"): a ~350 MB upload on a slow connection sent one giant
+chunk and gave up; a follow-up report showed a 16.6 GB upload OOM'ing (the CLI
+needed ~33 GB of RAM). Root cause was the implementation, not a server limit.
+
+Investigated Internxt's own repos (`internxt/sdk`, `inxt-js`, `drive-web`, the
+`Bridge` server) to learn the real protocol, then matched it:
+
+- **Streaming encryption (fixes the OOM).** The old path did
+  `plaintext = f.read()` then encrypted into a second full-size buffer — 2× file
+  size in RAM. AES-256-CTR is a stream cipher (ciphertext length == plaintext
+  length, one continuous keystream), so we now encrypt/hash/upload in ~30 MB
+  pieces via a stateful encryptor (`crypto.new_upload_cipher`). **Upload RAM is
+  now bounded by the part size, not the file size.**
+- **True S3 multipart (fixes slow/flaky connections).** `start_upload` now
+  honours `?multiparts=N` (was hardcoded to `1`). Files ≥ 100 MiB are uploaded
+  with one presigned PUT per 30 MB part (matching drive-web), **each part
+  retried independently** (`_put_with_retry`); the continuous CTR ciphertext is
+  simply byte-sliced into parts. Finish sends the S3 `UploadId` + `parts`
+  (`PartNumber`/`ETag`) manifest. Smaller files keep the single-PUT path.
+- **Protocol-correct shard hash.** Switched from plain `sha256` to
+  **`ripemd160(sha256(ciphertext))`** (40 hex), matching the official clients,
+  with a self-contained pure-Python RIPEMD-160 fallback for OpenSSL-3 / slim
+  Docker images where `hashlib.new('ripemd160')` is unavailable.
+- **Streaming download (symmetric fix).** `download_file` no longer loads the
+  whole ciphertext into RAM — it streams via `api.download_stream`, decrypts
+  incrementally (`crypto.new_download_decryptor`), and writes straight to disk.
+  A 16 GB *download* no longer OOMs either.
+- **`pgpy` packaging gap.** `requirements.txt` had `PGPy`, but `setup.py`'s
+  hardcoded `install_requires` did not — a `pip install .` would omit it and
+  break login. Added it.
+
+The single shared `_perform_network_upload` helper backs both
+`upload_file_to_folder` and `update_file` (the latter also previously did the
+read-whole-file + plain-sha256 bug). `_upload_chunk_with_progress` is now
+unused by the upload path but retained (still covered by its own tests).
+
+Verified **live against a real account**: a 110 MB file uploads as
+`Multipart upload: 4 part(s) of 30.0 MB` and round-trips byte-for-byte through
+the streaming download. Test count: **596 unit + 32 live = 628** (added a real
+multipart round-trip live test, skippable via `IXT_SKIP_MULTIPART=1`). All four
+gates (ruff, mypy, bandit, pytest) green.
+
+---
+
 ## CI mypy-gate fix (2026-05-30)
 
 The 2026-05-29 issues-fixes commit (`f5bf51c`) was green locally but the CI

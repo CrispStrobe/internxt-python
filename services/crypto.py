@@ -23,6 +23,104 @@ BUCKET_META_MAGIC = bytes([
     70, 138, 57, 61, 52, 19, 210, 170, 38, 164, 162, 200, 86, 201, 2, 81
 ])
 
+
+# --- RIPEMD-160 ------------------------------------------------------------
+# Internxt's network protocol uses ripemd160(sha256(ciphertext)) as the shard
+# content hash (see inxt-js src/lib/utils/streams/Hasher.ts). hashlib usually
+# provides ripemd160, but on systems where OpenSSL 3.0 disables the legacy
+# provider (common in slim Docker images) hashlib.new('ripemd160') raises. We
+# fall back to this self-contained pure-Python implementation in that case.
+
+_RMD_R = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    7, 4, 13, 1, 10, 6, 15, 3, 12, 0, 9, 5, 2, 14, 11, 8,
+    3, 10, 14, 4, 9, 15, 8, 1, 2, 7, 0, 6, 13, 11, 5, 12,
+    1, 9, 11, 10, 0, 8, 12, 4, 13, 3, 7, 15, 14, 5, 6, 2,
+    4, 0, 5, 9, 7, 12, 2, 10, 14, 1, 3, 8, 11, 6, 15, 13,
+]
+_RMD_RP = [
+    5, 14, 7, 0, 9, 2, 11, 4, 13, 6, 15, 8, 1, 10, 3, 12,
+    6, 11, 3, 7, 0, 13, 5, 10, 14, 15, 8, 12, 4, 9, 1, 2,
+    15, 5, 1, 3, 7, 14, 6, 9, 11, 8, 12, 2, 10, 0, 4, 13,
+    8, 6, 4, 1, 3, 11, 15, 0, 5, 12, 2, 13, 9, 7, 10, 14,
+    12, 15, 10, 4, 1, 5, 8, 7, 6, 2, 13, 14, 0, 3, 9, 11,
+]
+_RMD_S = [
+    11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8,
+    7, 6, 8, 13, 11, 9, 7, 15, 7, 12, 15, 9, 11, 7, 13, 12,
+    11, 13, 6, 7, 14, 9, 13, 15, 14, 8, 13, 6, 5, 12, 7, 5,
+    11, 12, 14, 15, 14, 15, 9, 8, 9, 14, 5, 6, 8, 6, 5, 12,
+    9, 15, 5, 11, 6, 8, 13, 12, 5, 12, 13, 14, 11, 8, 5, 6,
+]
+_RMD_SP = [
+    8, 9, 9, 11, 13, 15, 15, 5, 7, 7, 8, 11, 14, 14, 12, 6,
+    9, 13, 15, 7, 12, 8, 9, 11, 7, 7, 12, 7, 6, 15, 13, 11,
+    9, 7, 15, 11, 8, 6, 6, 14, 12, 13, 5, 14, 13, 13, 7, 5,
+    15, 5, 8, 11, 14, 14, 6, 14, 6, 9, 12, 9, 12, 5, 15, 8,
+    8, 5, 12, 9, 12, 5, 14, 6, 8, 13, 6, 5, 15, 13, 11, 11,
+]
+_RMD_K = [0x00000000, 0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xA953FD4E]
+_RMD_KP = [0x50A28BE6, 0x5C4DD124, 0x6D703EF3, 0x7A6D76E9, 0x00000000]
+
+
+def _rmd_rol(x: int, n: int) -> int:
+    return ((x << n) | (x >> (32 - n))) & 0xFFFFFFFF
+
+
+def _rmd_f(j: int, x: int, y: int, z: int) -> int:
+    if j < 16:
+        return x ^ y ^ z
+    if j < 32:
+        return (x & y) | (~x & z)
+    if j < 48:
+        return (x | ~y) ^ z
+    if j < 64:
+        return (x & z) | (y & ~z)
+    return x ^ (y | ~z)
+
+
+def ripemd160_pure(data: bytes) -> bytes:
+    """Self-contained RIPEMD-160. Used only as a fallback when hashlib lacks it."""
+    import struct
+
+    h0, h1, h2, h3, h4 = 0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0
+
+    msg = bytearray(data)
+    bit_len = (8 * len(data)) & 0xFFFFFFFFFFFFFFFF
+    msg.append(0x80)
+    while len(msg) % 64 != 56:
+        msg.append(0x00)
+    msg += struct.pack('<Q', bit_len)
+
+    for off in range(0, len(msg), 64):
+        x = struct.unpack('<16I', bytes(msg[off:off + 64]))
+        al, bl, cl, dl, el = h0, h1, h2, h3, h4
+        ar, br, cr, dr, er = h0, h1, h2, h3, h4
+        for j in range(80):
+            rnd = j // 16
+            t = (_rmd_rol((al + _rmd_f(j, bl, cl, dl) + x[_RMD_R[j]] + _RMD_K[rnd]) & 0xFFFFFFFF, _RMD_S[j]) + el) & 0xFFFFFFFF
+            al, el, dl, cl, bl = el, dl, _rmd_rol(cl, 10), bl, t
+            t = (_rmd_rol((ar + _rmd_f(79 - j, br, cr, dr) + x[_RMD_RP[j]] + _RMD_KP[rnd]) & 0xFFFFFFFF, _RMD_SP[j]) + er) & 0xFFFFFFFF
+            ar, er, dr, cr, br = er, dr, _rmd_rol(cr, 10), br, t
+        t = (h1 + cl + dr) & 0xFFFFFFFF
+        h1 = (h2 + dl + er) & 0xFFFFFFFF
+        h2 = (h3 + el + ar) & 0xFFFFFFFF
+        h3 = (h4 + al + br) & 0xFFFFFFFF
+        h4 = (h0 + bl + cr) & 0xFFFFFFFF
+        h0 = t
+
+    return struct.pack('<5I', h0, h1, h2, h3, h4)
+
+
+def ripemd160(data: bytes) -> bytes:
+    """ripemd160 via hashlib, falling back to the pure-Python implementation."""
+    try:
+        h = hashlib.new('ripemd160')
+        h.update(data)
+        return h.digest()
+    except (ValueError, TypeError):
+        return ripemd160_pure(data)
+
 class CryptoService:
     """Handles all cryptographic operations"""
 
@@ -84,7 +182,49 @@ class CryptoService:
         
         return encrypted_data, index.hex()
 
-    def decrypt_stream_internxt_protocol(self, encrypted_data: bytes, mnemonic: str, 
+    def new_upload_cipher(self, mnemonic: str, bucket_id: str) -> Tuple[Any, str]:
+        """
+        Create a stateful AES-256-CTR encryptor for a streaming upload.
+
+        Returns (encryptor, file_index_hex). Feed plaintext chunks via
+        ``encryptor.update(chunk)`` in order; because CTR is one continuous
+        keystream, the concatenated ciphertext is identical to encrypting the
+        whole file at once (and the same length). This lets us slice the
+        ciphertext into multipart parts without resetting the counter — exactly
+        what the official clients do (inxt-js multipart.ts / drive-web).
+        """
+        index = os.urandom(32)
+        file_key = self.generate_file_key(mnemonic, bucket_id, index)
+        iv = index[:16]
+        cipher = Cipher(algorithms.AES(file_key), modes.CTR(iv), backend=self.backend)
+        return cipher.encryptor(), index.hex()
+
+    def shard_hash_from_sha256(self, sha256_digest: bytes) -> str:
+        """
+        Compute the network shard content hash from a completed sha256 digest.
+
+        Internxt's protocol stores ripemd160(sha256(ciphertext)) as the shard
+        hash (40 hex chars), not plain sha256. Callers stream the ciphertext
+        through a hashlib.sha256() object and pass its .digest() here.
+        """
+        return ripemd160(sha256_digest).hex()
+
+    def new_download_decryptor(self, mnemonic: str, bucket_id: str, file_index_hex: str) -> Any:
+        """
+        Create a stateful AES-256-CTR decryptor for a streaming download.
+
+        Feed ciphertext chunks via ``decryptor.update(chunk)`` in order; the
+        concatenated plaintext is identical to decrypting the whole file at
+        once. Mirrors new_upload_cipher and lets us decrypt-to-disk without
+        holding the whole file in memory.
+        """
+        index = bytes.fromhex(file_index_hex)
+        file_key = self.generate_file_key(mnemonic, bucket_id, index)
+        iv = index[:16]
+        cipher = Cipher(algorithms.AES(file_key), modes.CTR(iv), backend=self.backend)
+        return cipher.decryptor()
+
+    def decrypt_stream_internxt_protocol(self, encrypted_data: bytes, mnemonic: str,
                                        bucket_id: str, file_index_hex: str) -> bytes:
         """
         Decrypts file data using Internxt protocol

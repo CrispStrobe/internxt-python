@@ -28,6 +28,7 @@ This is an unofficial, open-source project and is **not** affiliated with, endor
   - ✅ **Timestamp Preservation**: Preserves original file modification/creation dates on `upload` and `download-path`.
   - ✅ **Secure authentication**: Login/logout with 2FA support.
   - ✅ **File operations**: Upload, download with progress indicators.
+  - ✅ **Large files**: Streaming encrypt/upload and decrypt/download keep memory bounded (a few MB) regardless of file size; files ≥ 100 MiB use true multipart upload (30 MB parts, each retried independently) for resilient transfers on slow/flaky connections.
   - ✅ **Folder management**: Create and organize folders.
   - ✅ **Zero-knowledge encryption**: AES-256-CTR client-side encryption.
 

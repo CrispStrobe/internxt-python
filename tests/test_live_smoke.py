@@ -329,9 +329,9 @@ def test_live_upload_extensionless_file(authed_session, sentinel_folder, tmp_pat
 
 
 def test_live_upload_2mb_file_to_exercise_multipart_path(authed_session, sentinel_folder, tmp_path):
-    """Files above the in-memory threshold use the streaming-disk upload
-    path. Use 2 MB to keep quota impact small but force the production
-    code path that's harder to exercise in unit tests."""
+    """A 2 MB file stays under the 100 MiB multipart floor, so it uses the
+    single pre-signed PUT path — but still exercises the streaming
+    encrypt+upload code. Kept small to limit quota impact."""
     drive = authed_session['drive']
     sentinel_uuid = sentinel_folder['uuid']
 
@@ -359,12 +359,8 @@ def test_live_upload_2mb_file_to_exercise_multipart_path(authed_session, sentine
 
 
 def test_live_large_file_upload_round_trip(authed_session, sentinel_folder, tmp_path):
-    """Upload a 3 MB file (exercises the streaming progress-bar path in
-    _upload_chunk_with_progress) and verify byte-for-byte round-trip.
-
-    Note: the Internxt network API uses a single pre-signed URL for all
-    uploads regardless of size. The MULTIPART_THRESHOLD / CHUNK_SIZE
-    constants are reserved for future server-side multipart support."""
+    """Upload a 3 MB file (single-part streaming path) and verify
+    byte-for-byte round-trip via the streaming download path."""
     drive = authed_session['drive']
     sentinel_uuid = sentinel_folder['uuid']
 
@@ -397,6 +393,60 @@ def test_live_large_file_upload_round_trip(authed_session, sentinel_folder, tmp_
     assert len(downloaded) == size, f"Expected {size} bytes, got {len(downloaded)}"
     assert downloaded == payload, "Large file round-trip data mismatch"
     print("✅ LIVE: 3 MB round-trip integrity OK")
+
+
+def test_live_multipart_upload_round_trip(authed_session, sentinel_folder, tmp_path):
+    """REAL multipart: upload a file above the 100 MiB floor so the CLI uses
+    the S3 multipart path (one continuous AES-CTR keystream sliced into 30 MB
+    parts, each PUT separately, finished with an ETag/parts manifest), then
+    stream-download and verify byte-for-byte.
+
+    This is the headline validation for the large-file work — it exercises the
+    real ?multiparts=N start, per-part presigned PUTs, ripemd160(sha256) shard
+    hash, and CompleteMultipartUpload on the live backend. ~110 MB of quota,
+    cleaned up to trash with the rest of the sentinel folder.
+
+    Skippable via IXT_SKIP_MULTIPART=1 (it moves real bytes over the network)."""
+    if os.environ.get('IXT_SKIP_MULTIPART') == '1':
+        pytest.skip("IXT_SKIP_MULTIPART=1 set")
+
+    drive = authed_session['drive']
+    sentinel_uuid = sentinel_folder['uuid']
+
+    # 110 MB > 100 MiB floor → ceil(110/30) = 4 parts (30+30+30+20).
+    size = 110 * 1024 * 1024
+    assert size >= drive.MULTIPART_MIN_SIZE, "test size must exceed the multipart floor"
+    name = _unique_name('multipart')
+    local_file, payload = _write_payload(tmp_path, f"{name}.bin", size_bytes=size)
+    print(f"\n📝 LIVE: Wrote {drive._format_size(size)} for multipart test")
+
+    t0 = time.time()
+    uploaded = drive.upload_file_to_folder(
+        str(local_file), sentinel_uuid,
+        custom_name=name, custom_extension='bin',
+    )
+    elapsed = time.time() - t0
+    assert uploaded.get('uuid'), f"Multipart upload returned no uuid: {uploaded}"
+    print(f"✅ LIVE: Multipart-uploaded {drive._format_size(size)} in {elapsed:.1f}s")
+
+    # Round-trip via streaming download (retry for eventual consistency).
+    download_dir = tmp_path / "downloads"
+    download_dir.mkdir()
+    out_path = None
+    for _attempt in range(4):
+        try:
+            out_path = drive.download_file(uploaded['uuid'], str(download_dir))
+            break
+        except Exception as exc:
+            if 'not found' in str(exc).lower() and _attempt < 3:
+                time.sleep(3)
+                continue
+            raise
+    assert out_path is not None
+    downloaded = Path(out_path).read_bytes()
+    assert len(downloaded) == size, f"Expected {size} bytes, got {len(downloaded)}"
+    assert downloaded == payload, "Multipart round-trip data mismatch"
+    print(f"✅ LIVE: Multipart round-trip integrity OK ({drive._format_size(size)})")
 
 
 # =============================================================================

@@ -242,6 +242,39 @@ that's intentional. Always have a `# nosec` *with reason*.
 
 ---
 
+## A documented "impossibility" was just an unread upstream
+
+`PLAN.md` confidently stated that the network API "only supports
+`multiparts=1`" and that `multiparts=N` (N>1) "returns HTTP 400" — so true
+multipart upload was treated as out of reach. That assumption shaped the whole
+large-file story (the workaround was 1 MB tqdm sub-pieces of a single PUT,
+plus a 2× file-size in-memory buffer that OOM'd on a 16.6 GB file).
+
+It was simply wrong. Internxt open-sources every layer — `sdk`, `inxt-js`,
+`drive-web`, and the `Bridge` server. Thirty minutes reading them showed
+multipart is fully supported (≥ 100 MiB, up to 10000 parts, `urls[]` +
+`UploadId` in the response), that drive-web uses it with 30 MB parts, that the
+content hash is `ripemd160(sha256())` not plain `sha256`, and that the cipher
+is a single continuous AES-CTR keystream merely byte-sliced into parts.
+
+Lessons carried forward:
+
+- **When the client and server are both open source, read them before writing
+  "the backend doesn't support X."** A one-line assumption in a planning doc
+  can fossilize into an architecture. The cost of checking was tiny; the cost
+  of the wrong assumption was a memory-bound upload path.
+- **A stream cipher means you never need the whole file in RAM.** AES-CTR
+  ciphertext length == plaintext length and the keystream is continuous, so
+  Content-Length is known up front and you can encrypt/hash/PUT incrementally.
+  The OOM was self-inflicted by `f.read()`, not inherent.
+- **Re-verify "forward-compat" stubs against reality.** `start_upload` already
+  took `parts`/`chunk_size` params "for when the backend adds multipart" — but
+  it hardcoded `multiparts=1` and the backend already supported N. Stubs left
+  for a future that already arrived are worse than no stubs: they signal "not
+  possible yet" when it is.
+
+---
+
 ## On code-smell-to-bug correlation
 
 Five separate findings across this audit started as "minor cleanup

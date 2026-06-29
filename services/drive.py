@@ -6,6 +6,7 @@ with path resolution
 
 import os
 import sys
+import math
 import hashlib
 import fnmatch
 from pathlib import Path
@@ -50,8 +51,14 @@ class DriveService:
         self.CACHE_DURATION_SECONDS = 3600  # 1 hour
 
         self.TWENTY_GIGABYTES = 20 * 1024 * 1024 * 1024   # 20GB limit
-        self.MULTIPART_THRESHOLD = 100 * 1024 * 1024      # 100MB multipart threshold
-        self.CHUNK_SIZE = 64 * 1024 * 1024                # 64MB chunks
+        # Streaming-upload tuning (matches the official clients):
+        # the network API rejects multipart for files < 100 MiB, and drive-web
+        # uploads larger files in 30 MB parts (one continuous AES-CTR keystream
+        # sliced into S3 parts). RAM use during upload is bounded by the part
+        # size, not the file size.
+        self.MULTIPART_MIN_SIZE = 100 * 1024 * 1024       # server multipart floor
+        self.UPLOAD_PART_SIZE = 30 * 1024 * 1024          # 30MB parts
+        self.MAX_MULTIPARTS = 10000                       # server part-count ceiling
 
         # Memory-gated concurrency: only allow as many simultaneous
         # read+encrypt operations as fit in available RAM.  The semaphore
@@ -152,6 +159,121 @@ class DriveService:
         
         hashed_password = hashlib.sha256(str(user_id).encode()).hexdigest()
         return (bridge_user, hashed_password)
+
+    # ========== STREAMING NETWORK UPLOAD ==========
+
+    def _put_with_retry(self, do_put, part_no: int, total_parts: int, max_retries: int = 3):
+        """Run a single PUT (returning its result) with exponential-backoff retries.
+
+        Presigned URLs are reusable until they expire, so re-PUTting the same
+        part on a transient failure is safe. Only the failing part is retried,
+        which is the whole point of multipart for slow/flaky connections.
+        """
+        last_err = None
+        for attempt in range(max_retries):
+            try:
+                return do_put()
+            except Exception as e:
+                last_err = e
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    print(f"\n        ⚠️  Part {part_no}/{total_parts} failed "
+                          f"(attempt {attempt + 1}/{max_retries}): {e}; retrying in {wait}s...")
+                    time.sleep(wait)
+        raise Exception(f"Part {part_no}/{total_parts} failed after {max_retries} attempts: {last_err}")
+
+    def _perform_network_upload(self, file_path: Path, file_size: int, bucket_id: str,
+                                mnemonic: str, network_auth: tuple,
+                                timeout_seconds: int) -> str:
+        """Stream-encrypt a file and upload it to the network; return the network file id.
+
+        The file is encrypted with a single continuous AES-256-CTR keystream and
+        hashed (sha256) incrementally as it is read, so only one part (~30 MB)
+        is ever held in memory regardless of file size. Files >= 100 MiB are
+        uploaded with true S3 multipart (one presigned PUT per part, each
+        retried independently); smaller files use a single presigned PUT. The
+        stored shard hash is ripemd160(sha256(ciphertext)), matching the
+        official clients.
+        """
+        part_size = self.UPLOAD_PART_SIZE
+        use_multipart = file_size >= self.MULTIPART_MIN_SIZE
+        parts = 1
+        if use_multipart:
+            parts = math.ceil(file_size / part_size)
+            if parts > self.MAX_MULTIPARTS:
+                parts = self.MAX_MULTIPARTS
+                part_size = math.ceil(file_size / parts)
+
+        encryptor, file_index_hex = self.crypto.new_upload_cipher(mnemonic, bucket_id)
+        sha = hashlib.sha256()
+
+        if use_multipart:
+            print(f"        Multipart upload: {parts} part(s) of {self._format_size(part_size)}")
+
+        start_response = self.api.start_upload(bucket_id, file_size, auth=network_auth, parts=parts)
+        upload_details = start_response['uploads'][0]
+        file_network_uuid = upload_details['uuid']
+
+        single_url = None
+        urls = None
+        upload_id = None
+        if use_multipart:
+            urls = upload_details.get('urls')
+            upload_id = upload_details.get('UploadId') or upload_details.get('uploadId')
+            if not urls or upload_id is None:
+                raise ValueError("Server did not return multipart URLs/UploadId for a multipart upload")
+            if len(urls) < parts:
+                raise ValueError(f"Server returned {len(urls)} part URL(s), expected {parts}")
+        else:
+            single_url = upload_details.get('url')
+            if not single_url:
+                raise ValueError("Server did not return an upload URL")
+
+        parts_manifest = []
+        bytes_done = 0
+        with open(file_path, 'rb') as f, tqdm(
+                total=file_size, unit='B', unit_scale=True, desc='        Uploading',
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}] ETA: {remaining}',
+                leave=False) as pbar:
+            for part_index in range(parts):
+                remaining = file_size - bytes_done
+                read_size = remaining if not use_multipart else min(part_size, remaining)
+                plaintext = f.read(read_size)
+                if not plaintext and remaining > 0:
+                    raise IOError(f"Unexpected EOF reading {file_path} at offset {bytes_done}")
+                ciphertext = encryptor.update(plaintext)
+                sha.update(ciphertext)
+                bytes_done += len(plaintext)
+
+                if use_multipart:
+                    assert urls is not None  # validated above when use_multipart
+                    part_url = urls[part_index]
+                    etag = self._put_with_retry(
+                        lambda url=part_url, data=ciphertext: self.api.upload_part(url, data, timeout_seconds),
+                        part_index + 1, parts)
+                    parts_manifest.append({'PartNumber': part_index + 1, 'ETag': etag})
+                else:
+                    self._put_with_retry(
+                        lambda data=ciphertext: self.api.upload_chunk(single_url, data),
+                        1, 1)
+                pbar.update(len(plaintext))
+
+        # AES-CTR has no padding, so finalize() is normally empty; fold it in anyway.
+        tail = encryptor.finalize()
+        if tail:
+            sha.update(tail)
+
+        if bytes_done != file_size:
+            raise IOError(f"Read {bytes_done} bytes but file size is {file_size}")
+
+        content_hash = self.crypto.shard_hash_from_sha256(sha.digest())
+        shard: Dict[str, Any] = {'hash': content_hash, 'uuid': file_network_uuid}
+        if use_multipart:
+            shard['UploadId'] = upload_id
+            shard['parts'] = parts_manifest
+        finish_payload = {'index': file_index_hex, 'shards': [shard]}
+        finish_response = self.api.finish_upload(bucket_id, finish_payload, auth=network_auth)
+        return finish_response['id']
 
     # ========== PATH RESOLUTION ==========
 
@@ -574,26 +696,13 @@ class DriveService:
             mnemonic = user['mnemonic']
             network_auth = self._get_network_auth(user)
             
-            with open(file_path, 'rb') as f:
-                plaintext = f.read()
-            
-            # Encrypt and upload
-            encrypted_data, file_index_hex = self.crypto.encrypt_stream_internxt_protocol(plaintext, mnemonic, bucket_id)
-            start_response = self.api.start_upload(bucket_id, len(encrypted_data), auth=network_auth)
-            upload_details = start_response['uploads'][0]
-            upload_url = upload_details['url']
-            file_network_uuid = upload_details['uuid']
-            
-            self.api.upload_chunk(upload_url, encrypted_data)
-            
-            encrypted_hash = hashlib.sha256(encrypted_data).hexdigest()
-            finish_payload = {
-                'index': file_index_hex,
-                'shards': [{'hash': encrypted_hash, 'uuid': file_network_uuid}]
-            }
-            finish_response = self.api.finish_upload(bucket_id, finish_payload, auth=network_auth)
-            network_file_id = finish_response['id']
-            
+            # Stream-encrypt and upload (multipart for >= 100 MiB), bounding
+            # RAM by the part size and using the correct ripemd160(sha256) hash.
+            timeout_seconds = max(300, int(file_size / (100 * 1024)) + 60)
+            network_file_id = self._perform_network_upload(
+                file_path, file_size, bucket_id, mnemonic, network_auth, timeout_seconds
+            )
+
             # Replace file content using corrected API
             replace_payload = {
                 'fileId': network_file_id,
@@ -880,171 +989,68 @@ class DriveService:
             if modification_time:
                 print(f"        Modification: {modification_time}")
         
-        # Memory-gated: reserve ~2x file_size (plaintext + encrypted copy)
-        # so we don't OOM when multiple workers handle large files at once.
-        # After encryption we del plaintext and release half; the other half
-        # stays reserved until the upload finishes and encrypted_data is freed.
-        mem_need = file_size * 2
-        mem_held = 0  # tracks how much we currently hold
-        avail = self._available_memory()
-        print(f"     💾 Memory: {self._format_size(avail)} available, need ~{self._format_size(mem_need)} for read+encrypt")
+        # Streaming encrypt+upload: RAM is bounded by the part size (~30 MB),
+        # not the file size, so even multi-GB files no longer OOM. Reserve a
+        # small headroom so concurrent workers don't oversubscribe memory.
+        mem_need = self.UPLOAD_PART_SIZE * 2
         self._mem_acquire(mem_need)
-        mem_held = mem_need
-
+        start_total = time.time()
         try:
-            print("     📖 Reading file from disk...")
-            start_read = time.time()
-            try:
-                with open(file_path, 'rb') as f:
-                    plaintext = f.read()
-            except Exception as e:
-                raise IOError(f"Failed to read file {file_path}: {e}")
-
-            read_time = time.time() - start_read
-            print(f"     ✅ File read complete ({read_time:.1f}s, {self._format_size(len(plaintext))})")
-
-            # Step 1: Encryption
-            print(f"\n     🔐 Step 1/5: Encrypting {self._format_size(len(plaintext))}...")
-            print("        This may take a few minutes for large files...")
-            start_encrypt = time.time()
-
-            encrypted_data, file_index_hex = self.crypto.encrypt_stream_internxt_protocol(
-                plaintext, mnemonic, bucket_id
+            network_file_id = self._perform_network_upload(
+                file_path, file_size, bucket_id, mnemonic, network_auth, timeout_seconds
             )
-
-            encrypt_time = time.time() - start_encrypt
-            plaintext_len = len(plaintext)
-            del plaintext  # free ~file_size of RAM immediately
-            # Release half — plaintext is gone, encrypted_data (~file_size) stays
-            self._mem_release(file_size)
-            mem_held = file_size
-
-            print("     ✅ Encryption complete!")
-            print(f"        Time: {encrypt_time:.1f}s ({self._format_size(int(plaintext_len/encrypt_time))}/s)")
-            print(f"        Encrypted size: {self._format_size(len(encrypted_data))}")
-            print(f"        File index: {file_index_hex[:16]}...")
-        except BaseException:
-            self._mem_release(mem_held)
-            mem_held = 0
-            raise
-
-        # encrypted_data is in memory (~file_size); file_size is still reserved.
-        # Release the remaining reservation when we're done (success or final failure).
-        try:
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    # Step 2: Request upload URL
-                    print("\n     🚀 Step 2/5: Requesting upload URL from server...")
-                    start_init = time.time()
-
-                    start_response = self.api.start_upload(bucket_id, len(encrypted_data), auth=network_auth)
-                    upload_details = start_response['uploads'][0]
-                    upload_url = upload_details['url']
-                    file_network_uuid = upload_details['uuid']
-
-                    init_time = time.time() - start_init
-                    print(f"     ✅ Upload URL received ({init_time:.1f}s)")
-                    print(f"        Network UUID: {file_network_uuid}")
-                    print(f"        Upload URL: {upload_url[:50]}...")
-
-                    # Step 3: Upload encrypted data
-                    print(f"\n     ☁️  Step 3/5: Uploading {self._format_size(len(encrypted_data))} to network...")
-                    print(f"        Timeout: {timeout_seconds}s")
-                    print("        This is the longest step - please be patient...")
-
-                    start_upload = time.time()
-                    self._upload_chunk_with_progress(upload_url, encrypted_data, timeout_seconds)
-                    upload_time = time.time() - start_upload
-
-                    upload_speed = len(encrypted_data) / upload_time if upload_time > 0 else 0
-                    print("     ✅ Upload complete!")
-                    print(f"        Time: {upload_time:.1f}s ({self._format_size(int(upload_speed))}/s)")
-
-                    # Step 4: Finalize upload
-                    print("\n     ✅ Step 4/5: Finalizing upload on server...")
-                    start_finalize = time.time()
-
-                    encrypted_hash = hashlib.sha256(encrypted_data).hexdigest()
-                    print(f"        Computed hash: {encrypted_hash[:16]}...")
-
-                    finish_payload = {
-                        'index': file_index_hex,
-                        'shards': [{'hash': encrypted_hash, 'uuid': file_network_uuid}]
-                    }
-                    finish_response = self.api.finish_upload(bucket_id, finish_payload, auth=network_auth)
-                    network_file_id = finish_response['id']
-
-                    finalize_time = time.time() - start_finalize
-                    print(f"     ✅ Server finalization complete ({finalize_time:.1f}s)")
-                    print(f"        Network file ID: {network_file_id}")
-
-                    # Step 5: Create file entry
-                    print("\n     📋 Step 5/5: Creating file entry in your Drive...")
-                    start_entry = time.time()
-
-                    file_entry_payload = {
-                        'folderUuid': destination_folder_uuid,
-                        'plainName': file_name,
-                        'type': file_extension if file_extension else '',
-                        'size': file_size,
-                        'bucket': bucket_id,
-                        'fileId': network_file_id,
-                        'encryptVersion': 'Aes03',
-                        'name': ''
-                    }
-
-                    if creation_time:
-                        file_entry_payload['creationTime'] = creation_time
-                    if modification_time:
-                        file_entry_payload['modificationTime'] = modification_time
-
-                    created_file = self.api.create_file_entry(file_entry_payload)
-
-                    entry_time = time.time() - start_entry
-                    print(f"     ✅ File entry created ({entry_time:.1f}s)")
-                    print(f"        File UUID: {created_file.get('uuid', 'N/A')}")
-
-                    with self.cache_lock:
-                        cached_item = self.folder_content_cache.get(destination_folder_uuid)
-                        if cached_item:
-                            cache_time, content = cached_item
-                            content['files'].append(created_file)
-                            self.folder_content_cache[destination_folder_uuid] = (cache_time, content)
-
-                    if creation_time or modification_time:
-                        returned_creation = created_file.get('creationTime') or created_file.get('createdAt')
-                        returned_modification = created_file.get('modificationTime') or created_file.get('updatedAt')
-
-                        if creation_time and returned_creation:
-                            print(f"     ✅ Creation timestamp preserved: {returned_creation}")
-                        elif creation_time:
-                            print(f"     ⚠️  Creation timestamp NOT set (API returned: {returned_creation})")
-
-                        if modification_time and returned_modification:
-                            print(f"     ✅ Modification timestamp preserved: {returned_modification}")
-                        elif modification_time:
-                            print(f"     ⚠️  Modification timestamp NOT set (API returned: {returned_modification})")
-
-                    total_time = time.time() - start_read
-                    print("\n     🎉 Upload complete!")
-                    print(f"        Total time: {total_time:.1f}s ({total_time/60:.1f} minutes)")
-                    print(f"        Average speed: {self._format_size(int(file_size/total_time))}/s")
-
-                    return created_file
-
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        wait_time = 2 ** attempt
-                        print(f"\n     ⚠️  Upload failed (attempt {attempt+1}/{max_retries}): {e}")
-                        print(f"     ⏳ Retrying in {wait_time} seconds...")
-                        time.sleep(wait_time)
-                    else:
-                        raise Exception(f"Upload failed after {max_retries} attempts: {e}")
         finally:
-            # Release the remaining reservation for encrypted_data
-            if mem_held > 0:
-                self._mem_release(mem_held)
+            self._mem_release(mem_need)
+
+        print(f"     ✅ Network upload complete (file id: {network_file_id})")
+
+        # Create the Drive file entry pointing at the uploaded network file.
+        file_entry_payload = {
+            'folderUuid': destination_folder_uuid,
+            'plainName': file_name,
+            'type': file_extension if file_extension else '',
+            'size': file_size,
+            'bucket': bucket_id,
+            'fileId': network_file_id,
+            'encryptVersion': 'Aes03',
+            'name': ''
+        }
+        if creation_time:
+            file_entry_payload['creationTime'] = creation_time
+        if modification_time:
+            file_entry_payload['modificationTime'] = modification_time
+
+        created_file = self.api.create_file_entry(file_entry_payload)
+        print(f"     ✅ File entry created (UUID: {created_file.get('uuid', 'N/A')})")
+
+        with self.cache_lock:
+            cached_item = self.folder_content_cache.get(destination_folder_uuid)
+            if cached_item:
+                cache_time, content = cached_item
+                content['files'].append(created_file)
+                self.folder_content_cache[destination_folder_uuid] = (cache_time, content)
+
+        if creation_time or modification_time:
+            returned_creation = created_file.get('creationTime') or created_file.get('createdAt')
+            returned_modification = created_file.get('modificationTime') or created_file.get('updatedAt')
+
+            if creation_time and returned_creation:
+                print(f"     ✅ Creation timestamp preserved: {returned_creation}")
+            elif creation_time:
+                print(f"     ⚠️  Creation timestamp NOT set (API returned: {returned_creation})")
+
+            if modification_time and returned_modification:
+                print(f"     ✅ Modification timestamp preserved: {returned_modification}")
+            elif modification_time:
+                print(f"     ⚠️  Modification timestamp NOT set (API returned: {returned_modification})")
+
+        total_time = time.time() - start_total
+        print("\n     🎉 Upload complete!")
+        print(f"        Total time: {total_time:.1f}s ({total_time/60:.1f} minutes)")
+        if total_time > 0:
+            print(f"        Average speed: {self._format_size(int(file_size/total_time))}/s")
+
+        return created_file
 
     def _upload_chunk_with_progress(self, upload_url: str, chunk_data: bytes, timeout_seconds: int):
         """Upload chunk with custom timeout and progress tracking"""
@@ -1654,30 +1660,44 @@ class DriveService:
             print("     🔗 Download URL acquired")
             pbar.update(1)
             
-            pbar.set_description("☁️  Downloading encrypted data")
-            encrypted_data = self.api.download_chunk(download_url)
-            print(f"     ☁️  Downloaded {self._format_size(len(encrypted_data))} encrypted")
-            pbar.update(1)
-            
-            pbar.set_description("🔐 Decrypting")
-            decrypted_data = self.crypto.decrypt_stream_internxt_protocol(
-                encrypted_data, mnemonic, bucket_id, file_index_hex
-            )
-            
-            # Always trim to exact file size
-            decrypted_data = decrypted_data[:file_size]
-            print(f"     🔐 Decrypted {self._format_size(len(decrypted_data))}")
-            pbar.update(1)
-            
+            # Resolve the destination path up front so we can stream to disk.
             destination_path = Path(destination_path_str)
             if destination_path.is_dir():
                 destination_path = destination_path / file_name
-            
-            pbar.set_description("💾 Saving to disk")
-            with open(destination_path, 'wb') as f:
-                f.write(decrypted_data)
+
+            # Stream-download and decrypt directly to disk, a few MB at a time,
+            # so RAM stays bounded regardless of file size (AES-CTR decrypts
+            # incrementally). This replaces the old read-whole-file approach
+            # that OOM'd on large downloads.
+            pbar.set_description("☁️  Downloading + decrypting")
+            timeout_seconds = max(300, int(file_size / (100 * 1024)) + 60)
+            decryptor = self.crypto.new_download_decryptor(mnemonic, bucket_id, file_index_hex)
+            DL_CHUNK = 4 * 1024 * 1024
+            written = 0
+            with self.api.download_stream(download_url, timeout=timeout_seconds) as resp, \
+                    open(destination_path, 'wb') as out, \
+                    tqdm(total=file_size, unit='B', unit_scale=True, desc='        Progress',
+                         bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}] ETA: {remaining}',
+                         leave=False) as dbar:
+                for enc_chunk in resp.iter_content(chunk_size=DL_CHUNK):
+                    if not enc_chunk:
+                        continue
+                    plain = decryptor.update(enc_chunk)
+                    # Defensively trim so we never write past the real file size.
+                    if written + len(plain) > file_size:
+                        plain = plain[:file_size - written]
+                    if plain:
+                        out.write(plain)
+                        written += len(plain)
+                    dbar.update(len(enc_chunk))
+                tail = decryptor.finalize()
+                if tail and written < file_size:
+                    tail = tail[:file_size - written]
+                    out.write(tail)
+                    written += len(tail)
+            print(f"     ☁️  Downloaded + decrypted {self._format_size(written)} to disk")
             print(f"     💾 Saved to: {destination_path}")
-            pbar.update(1)
+            pbar.update(3)  # collapses the old download / decrypt / save steps
         
         # Set timestamps if requested
         if preserve_timestamps and (creation_time or modification_time):

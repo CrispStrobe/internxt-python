@@ -16,6 +16,27 @@ import pytest
 from services.drive import drive_service
 
 
+class _FakeStream:
+    """Minimal stand-in for a streaming requests.Response (download_stream)."""
+
+    def __init__(self, data):
+        self._data = data
+
+    def iter_content(self, chunk_size=None):
+        cs = chunk_size or (4 * 1024 * 1024)
+        for i in range(0, len(self._data), cs):
+            yield self._data[i:i + cs]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def close(self):
+        pass
+
+
 @pytest.fixture
 def fake_user_creds():
     """Realistic-looking credentials with valid mnemonic."""
@@ -116,8 +137,7 @@ def test_upload_round_trips_through_real_crypto(tmp_path, fake_user_creds, serve
     with patch.object(drive_service.auth, 'get_auth_details',
                       return_value=fake_user_creds), \
          patch.object(drive_service.api, 'start_upload', side_effect=fake_start_upload), \
-         patch.object(drive_service, '_upload_chunk_with_progress',
-                      side_effect=lambda url, data, t: fake_upload_chunk(url, data)), \
+         patch.object(drive_service.api, 'upload_chunk', side_effect=fake_upload_chunk), \
          patch.object(drive_service.api, 'finish_upload', side_effect=fake_finish_upload), \
          patch.object(drive_service.api, 'create_file_entry',
                       side_effect=fake_create_file_entry):
@@ -152,8 +172,8 @@ def test_upload_round_trips_through_real_crypto(tmp_path, fake_user_creds, serve
                       side_effect=fake_get_file_metadata), \
          patch.object(drive_service.api, 'get_download_links',
                       side_effect=fake_get_download_links), \
-         patch.object(drive_service.api, 'download_chunk',
-                      side_effect=fake_download_chunk):
+         patch.object(drive_service.api, 'download_stream',
+                      side_effect=lambda url, timeout=300: _FakeStream(fake_download_chunk(url))):
         out_path = drive_service.download_file('created-file-uuid', str(download_dir))
 
     # The downloaded file matches the original byte-for-byte
@@ -181,7 +201,7 @@ def test_upload_invalidates_destination_folder_cache(tmp_path, fake_user_creds, 
     with patch.object(drive_service.auth, 'get_auth_details',
                       return_value=fake_user_creds), \
          patch.object(drive_service.api, 'start_upload', side_effect=fake_start_upload), \
-         patch.object(drive_service, '_upload_chunk_with_progress'), \
+         patch.object(drive_service.api, 'upload_chunk'), \
          patch.object(drive_service.api, 'finish_upload',
                       return_value={'id': 'nfid'}), \
          patch.object(drive_service.api, 'create_file_entry',
@@ -247,7 +267,8 @@ def test_download_writes_to_destination_dir_with_correct_filename(tmp_path, fake
          patch.object(drive_service.api, 'get_file_metadata', return_value=metadata), \
          patch.object(drive_service.api, 'get_download_links',
                       return_value={'shards': [{'url': 'u'}], 'index': idx_hex}), \
-         patch.object(drive_service.api, 'download_chunk', return_value=enc):
+         patch.object(drive_service.api, 'download_stream',
+                      side_effect=lambda url, timeout=300: _FakeStream(enc)):
         out_path = drive_service.download_file('fid', str(download_dir))
 
     assert Path(out_path).name == 'README'
@@ -275,7 +296,8 @@ def test_download_preserves_modification_time_when_requested(tmp_path, fake_user
          patch.object(drive_service.api, 'get_file_metadata', return_value=metadata), \
          patch.object(drive_service.api, 'get_download_links',
                       return_value={'shards': [{'url': 'u'}], 'index': idx_hex}), \
-         patch.object(drive_service.api, 'download_chunk', return_value=enc):
+         patch.object(drive_service.api, 'download_stream',
+                      side_effect=lambda url, timeout=300: _FakeStream(enc)):
         out_path = drive_service.download_file('fid', str(out_dir),
                                                preserve_timestamps=True)
 
@@ -305,7 +327,8 @@ def test_download_truncates_decrypted_data_to_exact_size(tmp_path, fake_user_cre
          patch.object(drive_service.api, 'get_file_metadata', return_value=metadata), \
          patch.object(drive_service.api, 'get_download_links',
                       return_value={'shards': [{'url': 'u'}], 'index': idx_hex}), \
-         patch.object(drive_service.api, 'download_chunk', return_value=enc):
+         patch.object(drive_service.api, 'download_stream',
+                      side_effect=lambda url, timeout=300: _FakeStream(enc)):
         out_path = drive_service.download_file('fid', str(out_dir))
 
     assert Path(out_path).read_bytes() == payload

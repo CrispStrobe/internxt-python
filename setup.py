@@ -16,6 +16,7 @@ requirements = [
     "requests>=2.31.0",
     "cryptography>=41.0.0",
     "mnemonic>=0.20",          # ✅ Added missing mnemonic package
+    "PGPy>=0.6.0",             # OpenPGP key generation for login (server validates keys.ecc)
     "click>=8.1.0",
     "tqdm>=4.65.0",
     "keyring>=24.0.0",
