@@ -13,6 +13,7 @@ from typing import Optional, Dict, Any, List, Tuple
 import glob
 import time
 import threading
+import tempfile
 import concurrent.futures
 # Used for controlled webdav-start spawn (argv list, no shell, no untrusted input).
 import subprocess  # nosec B404
@@ -1249,6 +1250,134 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
         sys.exit(130)  # standard exit code for SIGINT
     if error_count:
         sys.exit(1)
+
+
+@cli.command()
+@click.argument('remote_path', type=str)
+@click.option('--on-conflict', type=click.Choice(['overwrite', 'skip'], case_sensitive=False),
+              default='overwrite', show_default=True,
+              help='Action if the target file already exists')
+@click.option('--chunk-workers', type=int, default=4, show_default=True,
+              help='Parallel multipart part PUTs within the file (1 = serial)')
+@click.option('--temp-dir', type=click.Path(file_okay=False), default=None,
+              help='Directory for the temporary spool file (default: system temp / $TMPDIR). '
+                   'The whole stream is buffered here before upload — ensure enough free space.')
+@click.option('--verbose', '-v', is_flag=True, help='Show verbose output')
+def rcat(remote_path: str, on_conflict: str, chunk_workers: int,
+         temp_dir: Optional[str], verbose: bool):
+    """Read data from standard input and upload it to a single file on Drive.
+
+    REMOTE_PATH is the full destination path INCLUDING the filename
+    (e.g. "/backups/db20260629.xz"). The parent folder is created if missing.
+
+    Mirrors `rclone rcat`: pipe a stream straight to Drive without a named local
+    file. Internxt's protocol requires the exact size up front (it pre-issues the
+    presigned part URLs at upload start), so true unknown-size streaming isn't
+    possible — the stream is first spooled to a temporary file to measure its
+    size, then encrypted and uploaded in a single streaming pass. Make sure the
+    temp dir has enough free space for the whole stream.
+
+    Examples:
+      mariadb-dump mydb | xz -6 | python cli.py rcat /backups/mydb.xz
+      tar czf - /etc | python cli.py rcat /backups/etc.tar.gz
+    """
+    if sys.stdin.isatty():
+        click.echo("❌ No data piped to stdin. `rcat` reads from a pipe, e.g.:", err=True)
+        click.echo("   mariadb-dump mydb | xz -6 | python cli.py rcat /backups/mydb.xz", err=True)
+        sys.exit(1)
+
+    # Split the destination into parent dir + filename (POSIX-style remote paths).
+    normalized = '/' + remote_path.strip().lstrip('/')
+    if normalized.endswith('/'):
+        click.echo(f"❌ REMOTE_PATH must include a filename, got a folder path: '{remote_path}'", err=True)
+        sys.exit(1)
+    parent_path = normalized.rsplit('/', 1)[0] or '/'
+    filename = normalized.rsplit('/', 1)[1]
+    if not filename:
+        click.echo(f"❌ REMOTE_PATH must include a filename: '{remote_path}'", err=True)
+        sys.exit(1)
+
+    # Within-file multipart concurrency for large streams (>= 100 MiB).
+    drive_service.chunk_workers = max(1, chunk_workers)
+
+    spool_path: Optional[str] = None
+    try:
+        click.echo("🔄 Refreshing authentication token...")
+        auth_service.refresh_tokens()
+        auth_service.get_auth_details()
+
+        # --- Resolve or create the parent folder ---
+        click.echo(f"🎯 Target: '{normalized}' (parent '{parent_path}')")
+        try:
+            parent_info = drive_service.resolve_path(parent_path)
+            if parent_info['type'] != 'folder':
+                click.echo(f"❌ Parent path '{parent_path}' exists but is not a folder.", err=True)
+                sys.exit(1)
+            parent_uuid = parent_info['uuid']
+            parent_path = parent_info['path']
+        except FileNotFoundError:
+            click.echo(f"⏳ Parent '{parent_path}' not found. Creating...")
+            created = drive_service.create_folder_recursive(parent_path)
+            parent_uuid = created['uuid']
+            parent_path = drive_service.resolve_path(parent_path)['path']
+        click.echo(f"✅ Parent folder ready (UUID: {parent_uuid[:8]}...)")
+
+        # --- Spool stdin to a temp file, measuring size ---
+        # The protocol needs the byte count before it will hand out part URLs,
+        # so we must buffer the whole stream to disk first.
+        if temp_dir:
+            os.makedirs(temp_dir, exist_ok=True)
+        click.echo("📥 Buffering stdin to a temporary file...")
+        bytes_written = 0
+        last_report = 0
+        chunk_size = 4 * 1024 * 1024
+        fd, spool_path = tempfile.mkstemp(dir=temp_dir, prefix='ixt-rcat-', suffix='.tmp')
+        with os.fdopen(fd, 'wb') as spool:
+            stdin_buf = sys.stdin.buffer
+            while True:
+                chunk = stdin_buf.read(chunk_size)
+                if not chunk:
+                    break
+                spool.write(chunk)
+                bytes_written += len(chunk)
+                if verbose and bytes_written - last_report >= 64 * 1024 * 1024:
+                    click.echo(f"   ... buffered {format_size(bytes_written)}")
+                    last_report = bytes_written
+        click.echo(f"✅ Buffered {format_size(bytes_written)} from stdin")
+
+        if bytes_written == 0:
+            click.echo("❌ stdin was empty — nothing to upload. (Aborting so an unattended "
+                       "backup doesn't silently succeed with no data.)", err=True)
+            sys.exit(1)
+
+        # --- Upload the spooled file under the requested name ---
+        result = drive_service.upload_single_item_with_conflict_handling(
+            local_path=Path(spool_path),
+            target_remote_parent_path_str=parent_path,
+            target_folder_uuid=parent_uuid,
+            on_conflict=on_conflict.lower(),
+            remote_filename=filename,
+        )
+        if result == 'uploaded':
+            click.echo(f"🎉 Streamed {format_size(bytes_written)} to '{normalized}'")
+        elif result == 'skipped':
+            click.echo(f"⏭️  Skipped '{normalized}' (already exists; --on-conflict=skip)")
+        else:
+            click.echo(f"❌ Failed to upload to '{normalized}'", err=True)
+            sys.exit(1)
+    except KeyboardInterrupt:
+        click.echo("\n⚠️  rcat ABORTED by user (Ctrl+C)", err=True)
+        sys.exit(130)
+    except Exception as e:
+        click.echo(f"❌ rcat failed: {e}", err=True)
+        sys.exit(1)
+    finally:
+        if spool_path and os.path.exists(spool_path):
+            try:
+                os.unlink(spool_path)
+            except OSError:
+                pass
+
 
 @cli.command()
 @click.argument('file_uuid')
