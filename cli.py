@@ -73,6 +73,16 @@ except ImportError as e:
     sys.exit(1) # Exit from the *original* service import error
 
 
+def _stdin_is_tty() -> bool:
+    """Whether stdin is an interactive terminal (i.e. nothing piped in).
+
+    Wrapped in a function so tests can patch it deterministically: Click's
+    CliRunner replaces ``sys.stdin`` during invocation, so patching
+    ``sys.stdin`` directly is unreliable across Click versions.
+    """
+    return sys.stdin.isatty()
+
+
 def format_size(size_bytes: int) -> str:
     """Format bytes to human readable size"""
     if not size_bytes:
@@ -1281,7 +1291,7 @@ def rcat(remote_path: str, on_conflict: str, chunk_workers: int,
       mariadb-dump mydb | xz -6 | python cli.py rcat /backups/mydb.xz
       tar czf - /etc | python cli.py rcat /backups/etc.tar.gz
     """
-    if sys.stdin.isatty():
+    if _stdin_is_tty():
         click.echo("❌ No data piped to stdin. `rcat` reads from a pipe, e.g.:", err=True)
         click.echo("   mariadb-dump mydb | xz -6 | python cli.py rcat /backups/mydb.xz", err=True)
         sys.exit(1)

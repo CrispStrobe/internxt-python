@@ -69,12 +69,14 @@ def test_rcat_rejects_folder_path(runner):
 
 
 def test_rcat_rejects_tty_stdin(runner):
-    # Simulate an interactive terminal (no pipe) -> should refuse.
-    with patch('sys.stdin') as fake_stdin:
-        fake_stdin.isatty.return_value = True
+    # Simulate an interactive terminal (no pipe) -> should refuse. Patch the
+    # cli._stdin_is_tty seam rather than sys.stdin (CliRunner replaces stdin).
+    with patch('cli._stdin_is_tty', return_value=True), \
+         patch('cli.auth_service.refresh_tokens') as refresh:
         result = runner.invoke(cli, ['rcat', '/backups/x.bin'])
     assert result.exit_code == 1
     assert 'stdin' in result.output.lower()
+    refresh.assert_not_called()  # bailed out before touching the network
 
 
 def test_rcat_creates_missing_parent(runner):
