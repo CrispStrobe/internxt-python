@@ -2225,17 +2225,21 @@ def trash_restore(uuid_or_path: str, destination: Optional[str]):
                 sys.exit(1)
             dest_uuid = resolved['uuid']
 
-        # Try as file first, then folder
+        # The API needs the item type, so try file first then folder. Keep the
+        # last failure so we surface the real reason instead of always claiming
+        # "not found" (which hid auth/network errors before).
         item_uuid = uuid_or_path
+        last_error: Optional[Exception] = None
         for itype in ('file', 'folder'):
             try:
                 api_client.restore_item(item_uuid, itype, dest_uuid)
                 click.echo(f"✅ Restored {itype} {item_uuid}")
                 return
-            except Exception:
-                continue
+            except Exception as restore_err:  # noqa: BLE001 — surfaced below if every type fails
+                last_error = restore_err
 
-        click.echo(f"❌ Could not restore item {item_uuid} — not found in trash", err=True)
+        detail = f" ({last_error})" if last_error else ""
+        click.echo(f"❌ Could not restore item {item_uuid} — not found in trash{detail}", err=True)
         sys.exit(1)
 
     except Exception as e:
