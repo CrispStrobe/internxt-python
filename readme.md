@@ -28,7 +28,8 @@ This is an unofficial, open-source project and is **not** affiliated with, endor
   - ✅ **Timestamp Preservation**: Preserves original file modification/creation dates on `upload` and `download-path`.
   - ✅ **Secure authentication**: Login/logout with 2FA support.
   - ✅ **File operations**: Upload, download with progress indicators.
-  - ✅ **Large files**: Streaming encrypt/upload and decrypt/download keep memory bounded (a few MB) regardless of file size; files ≥ 100 MiB use true multipart upload (30 MB parts, each retried independently) for resilient transfers on slow/flaky connections.
+  - ✅ **Stream from stdin (`rcat`)**: Pipe data straight to a Drive file (rclone-`rcat` style) for unattended backups — `mariadb-dump | xz | cli.py rcat /backups/db.xz`.
+  - ✅ **Large files**: Streaming encrypt/upload and decrypt/download keep memory bounded (a few MB) regardless of file size; files ≥ 100 MiB **automatically** use true multipart upload (30 MB parts, uploaded in parallel and each retried independently) for resilient transfers on slow/flaky connections. Parallel **ranged downloads** are available opt-in via `--ranged`.
   - ✅ **Folder management**: Create and organize folders.
   - ✅ **Zero-knowledge encryption**: AES-256-CTR client-side encryption.
 
@@ -160,6 +161,20 @@ python cli.py upload -r -p ./my-project /Backups/
 python cli.py upload -r ./photos /Photos --include "*.jpg" --on-conflict overwrite
 ```
 
+**Stream from stdin (`rcat`)**
+
+```bash
+# Pipe a stream straight to a Drive file (rclone-rcat style) — great for
+# unattended backups without a named local file. REMOTE_PATH includes the
+# filename; the parent folder is created if missing.
+mariadb-dump mydb | xz -6 | python cli.py rcat /backups/mydb.xz
+tar czf - /etc           | python cli.py rcat /backups/etc.tar.gz
+
+# Note: Internxt needs the exact size up front, so rcat first spools stdin to a
+# temp file to measure it, then encrypts+uploads in one pass. Ensure free temp
+# space for the whole stream (use --temp-dir to relocate the spool).
+```
+
 **Download**
 
 ```bash
@@ -171,6 +186,10 @@ python cli.py download-path -r "/Photos/2023" --destination ./My-Photos
 
 # Download a folder with filters
 python cli.py download-path -r "/Music" --include "*.mp3" --exclude "demo_*"
+
+# Opt in to parallel ranged downloads for large files (≥ 100 MiB). Off by
+# default; falls back to a single stream if the server ignores HTTP Range.
+python cli.py download-path -p "/Backups/bigdump.xz" --ranged --chunk-workers 4
 ```
 
 ### 🗑️ Delete & Trash Operations
