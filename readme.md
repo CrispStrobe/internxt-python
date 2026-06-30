@@ -73,6 +73,40 @@ python cli.py whoami
 python cli.py logout
 ```
 
+#### Supplying credentials securely
+
+Ways to provide the password, most to least secure:
+
+```bash
+# 1. Pipe via stdin — never appears in shell history, argv, or the process list
+printf '%s' "$MY_PASSWORD" | python cli.py login -e you@example.com --password-stdin
+
+# 2. Environment variables (good for CI; avoid `export`-ing into your shell rc)
+INTERNXT_EMAIL=you@example.com INTERNXT_PASSWORD="$MY_PASSWORD" python cli.py login
+
+# 3. The -e/-p flags  ⚠️  leak into shell history and `ps` — avoid on shared hosts
+```
+
+For 2FA in automation, pass the TOTP secret instead of a one-off code:
+`--tfa-secret` (or `INTERNXT_TFA_SECRET`) auto-generates the 6-digit code.
+
+#### How the session is stored
+
+After login the session (which includes your **mnemonic** — the key to all your
+files) is encrypted at rest in `~/.internxt-cli/.inxtcli` (file `0600`, dir `0700`).
+The encryption key is sourced in this order:
+
+1. **OS keychain** (macOS Keychain / Linux Secret Service / Windows Credential
+   Manager) via `keyring` — a random per-install key; **recommended**. Install
+   with `pip install keyring` if not already present.
+2. **`INTERNXT_CREDENTIALS_KEY`** env var — a key you supply (handy for CI where
+   there's no desktop keychain).
+3. **Legacy static key** — obfuscation only; used as a last resort if neither of
+   the above is available. The `0600` permission is your real protection here.
+
+Set `INTERNXT_NO_KEYRING=1` to skip the OS keychain (forces option 2/3). Legacy
+credential files from older versions are read and upgraded automatically.
+
 ### 🌐 WebDAV Server
 
 Mount your Internxt Drive as a local disk.

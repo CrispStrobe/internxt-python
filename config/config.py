@@ -7,8 +7,23 @@ Configuration management for Internxt CLI - EXACT match to TypeScript ConfigServ
 import os
 import json
 import sys
+import base64
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
+
+# Credential storage format. The on-disk file is a small JSON envelope:
+#   {"fmt": "inxt-cred-v1", "src": "keyring|env|static", "ct": "<aes-ciphertext>"}
+# The ciphertext is the credentials JSON encrypted with a *wrapping secret* whose
+# location is given by "src":
+#   - keyring : a random per-install key kept in the OS keychain (most secure)
+#   - env     : a user-supplied key from INTERNXT_CREDENTIALS_KEY (good for CI)
+#   - static  : the legacy public app constant (obfuscation only; file is 0600)
+# Legacy files (a bare encrypted blob, no envelope) are still read and migrated.
+CRED_FMT = "inxt-cred-v1"
+KEYRING_SERVICE = "internxt-cli"
+KEYRING_KEY = "wrapping-key"
+CRED_KEY_ENV = "INTERNXT_CREDENTIALS_KEY"
+NO_KEYRING_ENV = "INTERNXT_NO_KEYRING"
 
 
 class ConfigService:
@@ -97,21 +112,10 @@ class ConfigService:
             raise ValueError(f"Config key {key} was not found in process.env")
         return self.config[key]
 
-    def save_user_credentials(self, login_credentials: Dict[str, Any]) -> None:
-        """
-        Saves the authenticated user credentials to file
-        EXACT match to TypeScript ConfigService.saveUser()
-        @param login_credentials The user credentials to be saved
-        """
-        self._ensure_internxt_cli_data_dir_exists()
-        
-        # EXACT match to TypeScript:
-        # const credentialsString = JSON.stringify(loginCredentials);
-        # const encryptedCredentials = CryptoService.instance.encryptText(credentialsString);
-        # await fs.writeFile(ConfigService.CREDENTIALS_FILE, encryptedCredentials, 'utf8');
-        credentials_string = json.dumps(login_credentials)
-        
-        # Import crypto service here to avoid circular imports
+    # ---------------------------------------------------------------- helpers
+
+    def _get_crypto_service(self):
+        """Resolve the crypto service across the repo's import layouts."""
         try:
             from ..services.crypto import crypto_service
         except (ImportError, ValueError):
@@ -123,94 +127,161 @@ class ConfigService:
                 if parent_dir not in sys.path:
                     sys.path.insert(0, parent_dir)
                 from services.crypto import crypto_service
-        
-        encrypted_credentials = crypto_service.encrypt_text(credentials_string)
-        
+        return crypto_service
+
+    def _keyring(self):
+        """Return the `keyring` module if a usable OS backend is present, else None.
+
+        Set INTERNXT_NO_KEYRING=1 to force the file fallback (headless/CI, tests).
+        """
+        if os.environ.get(NO_KEYRING_ENV, '').lower() in ('1', 'true', 'yes'):
+            return None
+        try:
+            import keyring
+            from keyring.backends.fail import Keyring as _FailKeyring
+            if isinstance(keyring.get_keyring(), _FailKeyring):
+                return None
+            return keyring
+        except Exception:
+            return None
+
+    def _wrapping_secret_for_save(self) -> Tuple[str, str]:
+        """Pick where the credential-encryption key lives, best first.
+
+        keyring (OS keychain) → env (INTERNXT_CREDENTIALS_KEY) → static (legacy).
+        """
+        kr = self._keyring()
+        if kr is not None:
+            try:
+                secret = kr.get_password(KEYRING_SERVICE, KEYRING_KEY)
+                if not secret:
+                    secret = base64.b64encode(os.urandom(32)).decode('ascii')
+                    kr.set_password(KEYRING_SERVICE, KEYRING_KEY, secret)
+                return ('keyring', secret)
+            except Exception:
+                pass  # no usable backend at runtime → fall through
+        env_key = os.environ.get(CRED_KEY_ENV)
+        if env_key:
+            return ('env', env_key)
+        return ('static', self.get('APP_CRYPTO_SECRET'))
+
+    def _resolve_wrapping_secret(self, src: Optional[str]) -> Optional[str]:
+        """Find the key needed to DECRYPT a stored envelope, by its `src`."""
+        if src == 'keyring':
+            kr = self._keyring()
+            return kr.get_password(KEYRING_SERVICE, KEYRING_KEY) if kr else None
+        if src == 'env':
+            return os.environ.get(CRED_KEY_ENV)
+        if src == 'static':
+            return self.get('APP_CRYPTO_SECRET')
+        return None
+
+    def _restrict_file_perms(self, path: Path) -> None:
+        """Best-effort chmod 600 (no-op where unsupported, e.g. Windows)."""
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _parse_credentials(credentials_string: str) -> Dict[str, Any]:
+        def date_hook(pairs):
+            result = {}
+            for key, value in pairs:
+                if isinstance(value, str) and key == 'createdAt':
+                    from datetime import datetime
+                    try:
+                        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                        result[key] = dt.isoformat()
+                    except (ValueError, TypeError):
+                        result[key] = value
+                else:
+                    result[key] = value
+            return result
+        return json.loads(credentials_string, object_pairs_hook=date_hook)
+
+    # ------------------------------------------------------------- public API
+
+    def save_user_credentials(self, login_credentials: Dict[str, Any]) -> None:
+        """Encrypt and persist the authenticated user credentials.
+
+        The credentials JSON is encrypted with a wrapping key sourced from the OS
+        keychain when available (random per-install key), else INTERNXT_CREDENTIALS_KEY,
+        else the legacy static constant. The file is written 0600 and only ever
+        holds ciphertext.
+        """
+        self._ensure_internxt_cli_data_dir_exists()
+        credentials_string = json.dumps(login_credentials)
+        crypto_service = self._get_crypto_service()
+
+        src, secret = self._wrapping_secret_for_save()
+        ciphertext = crypto_service.encrypt_text_with_key(credentials_string, secret)
+        envelope = json.dumps({"fmt": CRED_FMT, "src": src, "ct": ciphertext})
+
         with open(self.credentials_file, 'w', encoding='utf-8') as f:
-            f.write(encrypted_credentials)
+            f.write(envelope)
+        self._restrict_file_perms(self.credentials_file)
 
     def clear_user_credentials(self) -> None:
-        """
-        Clears the authenticated user from file
-        EXACT match to TypeScript ConfigService.clearUser()
-        """
+        """Clear the stored credentials (file truncated + keyring key removed)."""
+        # Drop the OS-keychain wrapping key too, so nothing decryptable remains.
+        kr = self._keyring()
+        if kr is not None:
+            try:
+                kr.delete_password(KEYRING_SERVICE, KEYRING_KEY)
+            except Exception:
+                pass
+
         if not self.credentials_file.exists():
             return
-            
-        # EXACT match to TypeScript:
-        # const stat = await fs.stat(ConfigService.CREDENTIALS_FILE);
-        # if (stat.size === 0) throw new Error('Credentials file is already empty');
-        # return fs.writeFile(ConfigService.CREDENTIALS_FILE, '', 'utf8');
         try:
             stat = self.credentials_file.stat()
             if stat.st_size == 0:
                 raise ValueError('Credentials file is already empty')
         except FileNotFoundError:
-            # File doesn't exist, nothing to clear
             return
-            
+
         with open(self.credentials_file, 'w', encoding='utf-8') as f:
             f.write('')
 
     def read_user_credentials(self) -> Optional[Dict[str, Any]]:
-        """
-        Returns the authenticated user credentials
-        EXACT match to TypeScript ConfigService.readUser()
-        @returns The authenticated user credentials
+        """Decrypt and return the stored credentials, or None.
+
+        Handles both the JSON envelope (current) and a bare legacy blob, which is
+        transparently migrated to the envelope (and the keychain) on read.
         """
         try:
-            # EXACT match to TypeScript:
-            # const encryptedCredentials = await fs.readFile(ConfigService.CREDENTIALS_FILE, 'utf8');
-            # const credentialsString = CryptoService.instance.decryptText(encryptedCredentials);
-            # const loginCredentials = JSON.parse(credentialsString, (key, value) => {
-            #   if (typeof value === 'string' && key === 'createdAt') {
-            #     return new Date(value);
-            #   }
-            #   return value;
-            # }) as LoginCredentials;
-            
             with open(self.credentials_file, 'r', encoding='utf-8') as f:
-                encrypted_credentials = f.read()
+                stored = f.read()
 
-            if not encrypted_credentials.strip():
+            if not stored.strip():
                 return None
 
-            # Import crypto service here to avoid circular imports
-            try:
-                from ..services.crypto import crypto_service
-            except (ImportError, ValueError):
-                try:
-                    from internxt_cli.services.crypto import crypto_service
-                except (ImportError, ValueError):
-                    current_dir = os.path.dirname(os.path.abspath(__file__))
-                    parent_dir = os.path.dirname(current_dir)
-                    if parent_dir not in sys.path:
-                        sys.path.insert(0, parent_dir)
-                    from services.crypto import crypto_service
+            crypto_service = self._get_crypto_service()
 
-            credentials_string = crypto_service.decrypt_text(encrypted_credentials)
-            
-            # Parse JSON with date handling (matching TypeScript logic)
-            def date_hook(pairs):
-                result = {}
-                for key, value in pairs:
-                    if isinstance(value, str) and key == 'createdAt':
-                        # Convert to ISO string format (Python equivalent of new Date(value))
-                        from datetime import datetime
-                        try:
-                            dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
-                            result[key] = dt.isoformat()
-                        except (ValueError, TypeError):
-                            result[key] = value
-                    else:
-                        result[key] = value
-                return result
-            
-            login_credentials = json.loads(credentials_string, object_pairs_hook=date_hook)
-            return login_credentials
-            
+            # Current format: JSON envelope with an explicit key source.
+            if stored.lstrip().startswith('{'):
+                try:
+                    envelope = json.loads(stored)
+                except (ValueError, json.JSONDecodeError):
+                    envelope = None
+                if isinstance(envelope, dict) and envelope.get('fmt') == CRED_FMT:
+                    secret = self._resolve_wrapping_secret(envelope.get('src'))
+                    if not secret:
+                        return None  # wrapping key unavailable (e.g. keychain gone)
+                    plain = crypto_service.decrypt_text_with_key(envelope['ct'], secret)
+                    return self._parse_credentials(plain)
+
+            # Legacy format: a bare static-key blob. Decrypt, then migrate.
+            plain = crypto_service.decrypt_text(stored)
+            credentials = self._parse_credentials(plain)
+            try:
+                self.save_user_credentials(credentials)  # upgrade to envelope/keychain
+            except Exception:
+                pass
+            return credentials
+
         except Exception:
-            # EXACT match to TypeScript: catch { return; }
             return None
 
     def save_webdav_config(self, webdav_config: Dict[str, Any]) -> None:
@@ -271,6 +342,11 @@ class ConfigService:
                 raise FileNotFoundError()
         except FileNotFoundError:
             self.internxt_cli_data_dir.mkdir(parents=True, exist_ok=True)
+        # Keep the data dir private (credentials live here). Best-effort.
+        try:
+            os.chmod(self.internxt_cli_data_dir, 0o700)
+        except OSError:
+            pass
 
     def ensure_webdav_certs_dir_exists(self) -> None:
         """

@@ -3,6 +3,15 @@
 ## Unreleased
 
 ### Added
+- **Secure credential input + storage.** `login` now accepts the password via
+  `--password-stdin` (never hits argv/shell-history/process-list) and reads
+  `INTERNXT_EMAIL` / `INTERNXT_PASSWORD` env vars. The stored session is
+  encrypted at rest with a key from the **OS keychain** (`keyring`) when
+  available, else a user-supplied `INTERNXT_CREDENTIALS_KEY`, else the legacy
+  static key — and the credentials file/dir are now `0600`/`0700` (previously the
+  file was world-readable and "encrypted" only with a public constant). Legacy
+  credential files are auto-migrated on read. `INTERNXT_NO_KEYRING=1` forces the
+  file fallback.
 - **`rcat` — stream stdin to a Drive file** (issue #9): pipe a stream straight to
   Drive without a named local file, rclone-`rcat` style
   (`mariadb-dump | xz | cli.py rcat /backups/db.xz`). Internxt requires the exact

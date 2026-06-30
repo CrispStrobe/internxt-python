@@ -113,18 +113,40 @@ def cli():
 # ========== AUTHENTICATION COMMANDS ==========
 
 @cli.command()
-@click.option('--email', '-e', help='Your Internxt email')
-@click.option('--password', '-p', help='Your password')
+@click.option('--email', '-e', envvar='INTERNXT_EMAIL',
+              help='Your Internxt email (or set INTERNXT_EMAIL)')
+@click.option('--password', '-p', envvar='INTERNXT_PASSWORD',
+              help='Your password (or set INTERNXT_PASSWORD). Prefer '
+                   '--password-stdin over this flag — flags leak into shell '
+                   'history and the process list.')
+@click.option('--password-stdin', 'password_stdin', is_flag=True,
+              help='Read the password from standard input (most secure for '
+                   'scripts: printf %s "$PW" | ... login -e you@x.com --password-stdin).')
 @click.option('--tfa', '--2fa', help='Two-factor authentication code (6 digits)')
 @click.option('--tfa-secret', envvar='INTERNXT_TFA_SECRET',
               help='TOTP secret (base32) to auto-generate 2FA codes. '
                    'Can also be set via INTERNXT_TFA_SECRET env var.')
 @click.option('--non-interactive', is_flag=True, help='Run in non-interactive mode')
 @click.option('--debug', is_flag=True, help='Enable debug output')
-def login(email: Optional[str], password: Optional[str], tfa: Optional[str],
-          tfa_secret: Optional[str], non_interactive: bool, debug: bool):
-    """Login to your Internxt account"""
+def login(email: Optional[str], password: Optional[str], password_stdin: bool,
+          tfa: Optional[str], tfa_secret: Optional[str], non_interactive: bool,
+          debug: bool):
+    """Login to your Internxt account.
+
+    Credentials can be supplied (most to least secure): piped via
+    --password-stdin, the INTERNXT_EMAIL/INTERNXT_PASSWORD env vars, the
+    -e/-p flags, or an interactive prompt. After login the session is stored
+    encrypted in your OS keychain when available (see the docs for the
+    INTERNXT_CREDENTIALS_KEY / INTERNXT_NO_KEYRING fallbacks).
+    """
     try:
+        # --password-stdin wins over everything and never appears in argv/env.
+        if password_stdin:
+            if password:
+                click.echo("❌ Use either --password/--password-stdin or "
+                           "INTERNXT_PASSWORD, not both.", err=True)
+                sys.exit(1)
+            password = sys.stdin.readline().rstrip('\n').rstrip('\r')
         if debug:
             print("🔍 Debug mode enabled")
             print("🔍 API Endpoints:")
