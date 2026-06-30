@@ -100,6 +100,40 @@ def test_http_error_uses_default_when_body_is_not_json(client):
             client._make_request("GET", "https://api.example.com/x")
 
 
+def test_http_error_reads_network_gateway_error_key(client):
+    # The network/bridge gateway uses {"error": ...}, not {"message": ...}.
+    # This is the real quota rejection that used to surface as "Unknown Error".
+    fake = _make_response(420, b'{"error":"Max space used"}',
+                          json_body={'error': 'Max space used'})
+    with patch.object(client.session, 'request', return_value=fake):
+        with pytest.raises(ValueError) as exc:
+            client._make_request("POST", "https://api.example.com/files/start")
+    msg = str(exc.value)
+    assert "Max space used" in msg          # the real reason is surfaced
+    assert "420" in msg                      # status code is preserved
+    assert "quota" in msg.lower()            # actionable hint added
+    assert "Unknown Error" not in msg
+
+
+def test_http_error_includes_status_and_hint_for_auth(client):
+    fake = _make_response(401, b'{"message":"Unauthorized"}',
+                          json_body={'message': 'Unauthorized'})
+    with patch.object(client.session, 'request', return_value=fake):
+        with pytest.raises(ValueError) as exc:
+            client._make_request("GET", "https://api.example.com/x")
+    msg = str(exc.value)
+    assert "401" in msg and "Unauthorized" in msg
+    assert "log" in msg.lower()              # hint to re-authenticate
+
+
+def test_http_error_unwraps_nested_error_object(client):
+    fake = _make_response(400, b'{}',
+                          json_body={'error': {'message': 'bad index'}})
+    with patch.object(client.session, 'request', return_value=fake):
+        with pytest.raises(ValueError, match="bad index"):
+            client._make_request("GET", "https://api.example.com/x")
+
+
 def test_network_error_maps_to_connection_error(client):
     with patch.object(client.session, 'request',
                       side_effect=requests.exceptions.ConnectionError("DNS failed")):

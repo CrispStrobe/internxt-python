@@ -35,7 +35,7 @@ jobs:
         run: ruff check .
 
       - name: Type check (mypy)
-        run: mypy --no-incremental cli.py services
+        run: mypy --no-incremental cli.py services utils config
 
       - name: Security scan (bandit, medium+)
         run: bandit -r . -x ./.mypy_cache,./__pycache__,./.git,./tests -ll

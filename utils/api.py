@@ -55,14 +55,55 @@ class ApiClient:
             response.raise_for_status()
             return response
         except requests.exceptions.HTTPError as e:
-            error_message = f"HTTP {e.response.status_code} Error"
-            try: 
-                error_message = e.response.json().get("message", "Unknown Error")
-            except json.JSONDecodeError: 
-                pass
-            raise ValueError(f"API Error: {error_message}") from e
+            raise ValueError(self._extract_api_error(e.response)) from e
         except requests.exceptions.RequestException as e:
             raise ConnectionError(f"Network request failed for {url}: {e}") from e
+
+    @staticmethod
+    def _extract_api_error(response: requests.Response) -> str:
+        """Turn a failed API response into a clear, actionable message.
+
+        Internxt's services are inconsistent about the error key: the Drive API
+        uses ``{"message": ...}`` while the network/bridge gateway uses
+        ``{"error": ...}`` (e.g. ``{"error": "Max space used"}`` for a full
+        account — which previously surfaced as a useless "Unknown Error"). This
+        reads either key (and a nested ``error.message``), always includes the
+        HTTP status, falls back to the raw body for non-JSON responses, and adds
+        a hint for well-known conditions like quota exhaustion or auth expiry.
+        """
+        status = getattr(response, 'status_code', '?')
+        detail: Any = ""
+        try:
+            body = response.json()
+            if isinstance(body, dict):
+                detail = body.get("message") or body.get("error") or body.get("reason") or ""
+                if isinstance(detail, dict):  # e.g. {"error": {"message": "..."}}
+                    detail = detail.get("message") or detail.get("error") or ""
+        except (ValueError, json.JSONDecodeError):
+            detail = ""
+        detail = str(detail).strip()
+        if not detail:
+            # Non-JSON or empty body: use a trimmed slice of the raw text.
+            raw = (getattr(response, 'text', '') or "").strip()
+            detail = raw[:200] + ("…" if len(raw) > 200 else "")
+
+        hint = ""
+        low = f"{status} {detail}".lower()
+        if status in (420, 507) or "max space" in low or "space used" in low or "quota" in low:
+            hint = " — storage quota exceeded; free up space or upgrade your plan"
+        elif status == 401:
+            hint = " — not authenticated; your session may have expired (try logging in again)"
+        elif status == 402:
+            hint = " — payment required; check your subscription"
+        elif status == 413:
+            hint = " — the file is too large for this request"
+        elif status == 429:
+            hint = " — rate limited; too many requests, retry after a short wait"
+
+        base = f"API Error (HTTP {status})"
+        if detail:
+            base += f": {detail}"
+        return base + hint
 
     # Robust wrapper to ensure return is always a dictionary
     def post(self, url: str, data=None, **kwargs) -> Dict[str, Any]:
@@ -150,12 +191,12 @@ class ApiClient:
         response = self._make_request("DELETE", url, data=data, headers=headers, auth=auth)
         return response.json() if response.content else {}
     
-    def put(self, url: str, data: Dict[str, Any] = None, headers: Dict[str, str] = None, auth: Optional[tuple] = None) -> Dict[str, Any]:
+    def put(self, url: str, data: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None, auth: Optional[tuple] = None) -> Dict[str, Any]:
         """Make PUT request and return JSON"""
         response = self._make_request("PUT", url, data=data, headers=headers, auth=auth)
         return response.json() if response.content else {}
 
-    def patch(self, url: str, data: Dict[str, Any] = None, headers: Dict[str, str] = None, auth: Optional[tuple] = None) -> Dict[str, Any]:
+    def patch(self, url: str, data: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None, auth: Optional[tuple] = None) -> Dict[str, Any]:
         """Make PATCH request and return JSON"""
         response = self._make_request("PATCH", url, data=data, headers=headers, auth=auth)
         return response.json() if response.content else {}
@@ -233,9 +274,11 @@ class ApiClient:
         Ref: GET /folders/{uuid}/ancestors
         """
         url = f"{self.drive_api_url}/folders/{folder_uuid}/ancestors"
-        response = self.get(url)
-        # The API returns a list directly
-        return response if isinstance(response, list) else []
+        # This endpoint returns a JSON list directly (not the usual dict), so go
+        # through _make_request and inspect the parsed body rather than self.get().
+        resp = self._make_request("GET", url)
+        data: Any = resp.json() if resp.content else []
+        return data if isinstance(data, list) else []
 
     # ========== MOVE OPERATIONS ==========
     
@@ -257,7 +300,7 @@ class ApiClient:
         data = {'destinationFolder': destination_folder_uuid}  # field name
         return self.patch(url, data)
 
-    def rename_file(self, file_uuid: str, new_name: str, new_type: str = None) -> Dict[str, Any]:
+    def rename_file(self, file_uuid: str, new_name: str, new_type: Optional[str] = None) -> Dict[str, Any]:
         """
         Rename file using metadata update
         Real SDK: PUT /files/{fileUuid}/meta
