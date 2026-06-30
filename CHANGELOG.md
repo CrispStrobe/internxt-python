@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Added
+- **Implicit auto-login for unattended pipelines** (issue #9): when no valid
+  session is stored, commands now log in automatically from `INTERNXT_EMAIL` /
+  `INTERNXT_PASSWORD` (+ `INTERNXT_TFA_SECRET` for 2FA), so `… | rcat …` needs no
+  separate `login` step. Also kicks in transparently when a stored token has
+  expired. An explicit `login && … && logout` flow still works.
 - **Secure credential input + storage.** `login` now accepts the password via
   `--password-stdin` (never hits argv/shell-history/process-list) and reads
   `INTERNXT_EMAIL` / `INTERNXT_PASSWORD` env vars. The stored session is
@@ -33,6 +38,12 @@
 - Repaired pre-existing `mypy` gaps in `utils/api.py` (implicit-`Optional`
   defaults, an unreachable `isinstance`); the CI type-check gate now covers
   `utils` and `config` too.
+- **Quieter unattended logs** (issue #9): the internal auth `TRACE`/`DEBUG`
+  lines (which echoed the account email and bridge-auth material on every
+  authenticated command) are now off by default and emitted to stderr only when
+  `INTERNXT_DEBUG=1`.
+- **`logout` now exits non-zero on failure**, so a scripted
+  `login && … | rcat … && logout` chain can trap a failed logout.
 
 ### Notes
 - **Multipart upload is automatic** for files ≥ 100 MiB (the server's multipart

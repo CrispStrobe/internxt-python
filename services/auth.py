@@ -4,12 +4,26 @@ internxt_cli/services/auth.py
 Authentication service for Internxt CLI
 """
 import hashlib
+import os
+import sys
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from config.config import config_service
 from utils.api import api_client
 from services.crypto import crypto_service
+
+# Internal trace/diagnostics are off by default and go to stderr when enabled,
+# so they never pollute stdout (e.g. piped output) or unattended backup logs.
+# Enable with INTERNXT_DEBUG=1 (or true/yes/on).
+_DEBUG = os.environ.get('INTERNXT_DEBUG', '').strip().lower() in (
+    '1', 'true', 'yes', 'on')
+
+
+def _dbg(message: str) -> None:
+    if _DEBUG:
+        print(message, file=sys.stderr)
+
 
 class AuthService:
     def __init__(self):
@@ -21,10 +35,10 @@ class AuthService:
         try:
             details = self.api.security_details(email)
             is_needed = details.get('tfa', False)
-            print(f"    ✅ Security details successful, 2FA Enabled: {is_needed}")
+            _dbg(f"    ✅ Security details successful, 2FA Enabled: {is_needed}")
             return is_needed
         except Exception as e:
-            print(f"    ⚠️  Could not determine 2FA status. Reason: {e}")
+            print(f"    ⚠️  Could not determine 2FA status. Reason: {e}", file=sys.stderr)
             return False
 
     def compute_bridge_auth(self, bridge_user: str, user_id: str) -> tuple:
@@ -32,7 +46,7 @@ class AuthService:
         Creates the Basic Auth tuple for the Internxt Network/Bridge API.
         The password is the SHA256 hash of the UserID.
         """
-        print(f"🔐 DEBUG: Computing Bridge Auth for UserID: {user_id}")
+        _dbg(f"🔐 DEBUG: Computing Bridge Auth for UserID: {user_id}")
         hashed_pass = hashlib.sha256(str(user_id).encode()).hexdigest()
         # Returns tuple for requests (user, pass)
         return (bridge_user, hashed_pass)
@@ -42,7 +56,7 @@ class AuthService:
         Performs the modern Hydrated Login Flow.
         """
         clean_email = email.lower().strip()
-        print(f"🚀 TRACE: Starting Hydrated Login for {clean_email}")
+        _dbg(f"🚀 TRACE: Starting Hydrated Login for {clean_email}")
         
         # Step 1: Security Details (SDK: securityDetails)
         # Returns the encryption salt (sKey)
@@ -53,7 +67,7 @@ class AuthService:
 
         # Step 2: Client-side Crypto
         encrypted_password_hash = self.crypto.encrypt_password_hash(password, s_key)
-        print("   🔑 Generating OpenPGP login keys...")
+        _dbg("   🔑 Generating OpenPGP login keys...")
         keys_payload = self.crypto.generate_keys(password)
 
         # Step 3: Access Call (SDK: loginAccess)
@@ -72,13 +86,13 @@ class AuthService:
             'publicKey': keys_payload['publicKey']
         }
         
-        print("🔐 TRACE: Requesting initial session token...")
+        _dbg("🔐 TRACE: Requesting initial session token...")
         access_res = self.api.login_access(login_payload)
         temp_token = access_res.get('newToken')
 
         # Step 4: HYDRATION (Mandatory Refresh)
         # Modern Internxt requires calling /refresh to populate storage cluster metadata
-        print("💧 TRACE: Hydrating session metadata (bucket, userId, bridgeUser)...")
+        _dbg("💧 TRACE: Hydrating session metadata (bucket, userId, bridgeUser)...")
         hydrated = self.api.refresh_token(temp_token)
         
         user_data = hydrated['user']
@@ -98,26 +112,75 @@ class AuthService:
             'lastLoggedInAt': datetime.now(timezone.utc).isoformat()
         }
 
+    def _auto_login_from_env(self) -> Optional[Dict[str, Any]]:
+        """Implicit login from INTERNXT_EMAIL / INTERNXT_PASSWORD (+ optional
+        INTERNXT_TFA_SECRET) so piped/unattended commands (e.g. `… | rcat …`)
+        work without a prior explicit `login`.
+
+        Returns the hydrated credentials on success, or None when the env vars
+        aren't set (caller then surfaces the usual "please login" error). Raises
+        on a genuine auth failure — a wrong password or a 2FA requirement with no
+        TOTP secret — so unattended runs fail loudly instead of silently.
+        """
+        email = os.environ.get('INTERNXT_EMAIL')
+        password = os.environ.get('INTERNXT_PASSWORD')
+        if not (email and password):
+            return None
+
+        _dbg(f"🔐 Auto-login as {email} (from INTERNXT_EMAIL)…")
+        tfa = None
+        if self.is_2fa_needed(email):
+            secret = os.environ.get('INTERNXT_TFA_SECRET')
+            if not secret:
+                raise ValueError(
+                    "Auto-login requires a 2FA code: set INTERNXT_TFA_SECRET "
+                    "(your TOTP base32 secret) for unattended login.")
+            try:
+                import pyotp
+            except ImportError:
+                raise ValueError(
+                    "pyotp is required for INTERNXT_TFA_SECRET. "
+                    "Run: pip install pyotp")
+            tfa = pyotp.TOTP(secret).now()
+        return self.login(email, password, tfa)
+
     def refresh_tokens(self) -> Dict[str, Any]:
-        """Rotates tokens and updates bridge auth if user metadata changed."""
+        """Rotates tokens and updates bridge auth if user metadata changed.
+
+        Falls back to an implicit env-based login when there's no stored session
+        to refresh, or when rotation fails (e.g. an expired/revoked token), so
+        unattended pipelines don't require a separate `login` step.
+        """
         creds = self.config.read_user_credentials()
-        print(f"🔄 DEBUG: Refreshing tokens for {creds['user']['email']}")
-        
+        if not creds or not creds.get('newToken'):
+            auto = self._auto_login_from_env()
+            if auto:
+                return auto
+            raise ValueError(
+                "MissingCredentialsError: No valid credentials found. Please login "
+                "(or set INTERNXT_EMAIL / INTERNXT_PASSWORD for auto-login).")
+        _dbg(f"🔄 DEBUG: Refreshing tokens for {creds['user']['email']}")
+
         try:
             resp = self.api.refresh_token(creds['newToken'])
-            
+
             # Update tokens and bridge auth
             creds['token'] = resp['token']
             creds['newToken'] = resp['newToken']
             creds['user']['bridgeAuth'] = self.compute_bridge_auth(
                 resp['user']['bridgeUser'], resp['user']['userId']
             )
-            
+
             self.config.save_user_credentials(creds)
             self.api.set_auth_tokens(creds['token'], creds['newToken'])
             return creds
         except Exception as e:
-            print(f"❌ DEBUG: Token rotation failed: {e}")
+            _dbg(f"❌ DEBUG: Token rotation failed: {e}")
+            # A stale/revoked stored token shouldn't strand an unattended run if
+            # env credentials are available — retry via a fresh login.
+            auto = self._auto_login_from_env()
+            if auto:
+                return auto
             raise
 
     def login(self, email: str, password: str, tfa_code: Optional[str] = None) -> Dict[str, Any]:
@@ -129,7 +192,14 @@ class AuthService:
     def get_auth_details(self) -> Dict[str, Any]:
         login_creds = self.config.read_user_credentials()
         if not login_creds or not all(k in login_creds for k in ['newToken', 'token']) or not login_creds.get('user', {}).get('mnemonic'):
-            raise ValueError("MissingCredentialsError: No valid credentials found. Please login.")
+            # No usable stored session — try an implicit env-based login so
+            # unattended/piped commands work without a prior explicit `login`.
+            login_creds = self._auto_login_from_env()
+            if not login_creds:
+                raise ValueError(
+                    "MissingCredentialsError: No valid credentials found. Please "
+                    "login (or set INTERNXT_EMAIL / INTERNXT_PASSWORD for "
+                    "auto-login).")
         self.api.set_auth_tokens(login_creds.get('token'), login_creds.get('newToken'))
         return login_creds
 

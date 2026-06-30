@@ -275,6 +275,7 @@ def logout():
         click.echo("✅ Successfully logged out")
     except Exception as e:
         click.echo(f"❌ Error during logout: {e}", err=True)
+        sys.exit(1)
 
 
 # ========== BASIC FILE OPERATIONS ==========
@@ -1309,7 +1310,20 @@ def rcat(remote_path: str, on_conflict: str, chunk_workers: int,
     size, then encrypted and uploaded in a single streaming pass. Make sure the
     temp dir has enough free space for the whole stream.
 
+    UPSTREAM PASSWORDS: while you're piping into rcat the upstream command owns
+    no terminal, so a tool that prompts for its own password (pg_dump,
+    mysqldump, …) can't ask interactively — supply it non-interactively instead,
+    e.g. PGPASSWORD / a ~/.pgpass file (Postgres) or MYSQL_PWD / a ~/.my.cnf
+    [client] section (MySQL/MariaDB). Otherwise the dump fails before any data
+    reaches rcat.
+
+    AUTH: rcat uses your saved session if present; otherwise it auto-logs-in
+    from INTERNXT_EMAIL / INTERNXT_PASSWORD (+ INTERNXT_TFA_SECRET for 2FA), so a
+    pipeline needs no separate `login` step. You can still do an explicit
+    `login && … | rcat … && logout` if you prefer.
+
     Examples:
+      PGPASSWORD=secret pg_dump -Fc mydb | python cli.py rcat /backups/mydb.dmp
       mariadb-dump mydb | xz -6 | python cli.py rcat /backups/mydb.xz
       tar czf - /etc | python cli.py rcat /backups/etc.tar.gz
     """

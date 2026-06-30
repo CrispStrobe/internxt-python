@@ -90,6 +90,13 @@ INTERNXT_EMAIL=you@example.com INTERNXT_PASSWORD="$MY_PASSWORD" python cli.py lo
 For 2FA in automation, pass the TOTP secret instead of a one-off code:
 `--tfa-secret` (or `INTERNXT_TFA_SECRET`) auto-generates the 6-digit code.
 
+**Implicit auto-login.** You don't strictly need to run `login` first: when no
+valid session is stored, every command (e.g. `rcat`) auto-logs-in from
+`INTERNXT_EMAIL` / `INTERNXT_PASSWORD` (+ `INTERNXT_TFA_SECRET` if 2FA is on).
+This also kicks in transparently if a stored token has expired. Set
+`INTERNXT_DEBUG=1` to surface the internal auth trace (off by default; it goes
+to stderr so it never pollutes piped output).
+
 #### How the session is stored
 
 After login the session (which includes your **mnemonic** — the key to all your
@@ -203,6 +210,20 @@ python cli.py upload -r ./photos /Photos --include "*.jpg" --on-conflict overwri
 # filename; the parent folder is created if missing.
 mariadb-dump mydb | xz -6 | python cli.py rcat /backups/mydb.xz
 tar czf - /etc           | python cli.py rcat /backups/etc.tar.gz
+
+# Auto-login: if you're not logged in, rcat (and the other commands) log in
+# from INTERNXT_EMAIL / INTERNXT_PASSWORD (+ INTERNXT_TFA_SECRET for 2FA), so a
+# pipeline needs no separate `login` step:
+INTERNXT_EMAIL=you@example.com INTERNXT_PASSWORD="$PW" \
+  pg_dump -Fc mydb | python cli.py rcat /backups/mydb.dmp
+# ...or keep them separate and trap each phase:
+python cli.py login -e you@example.com --password-stdin <<<"$PW" \
+  && PGPASSWORD="$DBPW" pg_dump -Fc mydb | python cli.py rcat /backups/mydb.dmp \
+  && python cli.py logout
+
+# Upstream passwords: while piping into rcat the dump tool has no terminal, so
+# it can't prompt for ITS OWN db password — supply it non-interactively, e.g.
+# PGPASSWORD / ~/.pgpass (Postgres) or MYSQL_PWD / ~/.my.cnf (MySQL/MariaDB).
 
 # Note: Internxt needs the exact size up front, so rcat first spools stdin to a
 # temp file to measure it, then encrypts+uploads in one pass. Ensure free temp
