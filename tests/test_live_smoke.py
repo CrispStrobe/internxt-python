@@ -64,6 +64,16 @@ def _load_dotenv_if_present():
 
 _load_dotenv_if_present()
 
+# The autouse `_no_os_keyring` fixture (tests/conftest.py) forces
+# INTERNXT_NO_KEYRING=1 per test — but it is function-scoped, whereas the
+# `authed_session` login below is module-scoped and runs *first*. Without this
+# line, login would persist credentials under the OS-keychain key while every
+# test reads them back under the legacy key, causing a decrypt mismatch and a
+# spurious MissingCredentialsError. Pin the setting at module import so the save
+# and all reads use the same (legacy) key. On machines with no OS keychain (CI)
+# the mismatch never occurred, which is why this went unnoticed.
+os.environ.setdefault('INTERNXT_NO_KEYRING', '1')
+
 
 # ---------- skip conditions ----------
 
