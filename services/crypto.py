@@ -4,6 +4,7 @@ internxt_cli/services/crypto.py
 Cryptographic operations for Internxt CLI
 """
 import os
+import sys
 import hashlib
 import base64
 import hmac
@@ -16,6 +17,17 @@ from cryptography.hazmat.backends import default_backend
 from mnemonic import Mnemonic
 
 from config.config import config_service
+
+# Diagnostics are off by default and go to stderr when enabled (mirrors auth.py),
+# so they never pollute stdout. Enable with INTERNXT_DEBUG=1 (or true/yes/on).
+_DEBUG = os.environ.get('INTERNXT_DEBUG', '').strip().lower() in (
+    '1', 'true', 'yes', 'on')
+
+
+def _dbg(message: str) -> None:
+    if _DEBUG:
+        print(message, file=sys.stderr)
+
 
 # constants from inxt-js crypto.ts
 BUCKET_META_MAGIC = bytes([
@@ -454,36 +466,24 @@ class CryptoService:
         ciphertext, tag = ciphertext_with_tag[:-16], ciphertext_with_tag[-16:]
         return base64.b64encode(salt + iv + tag + ciphertext).decode('ascii')
 
-    def generate_keys(self, password: str) -> Dict[str, Any]:
-        """
-        Generates a real OpenPGP Ed25519 (legacy) keypair for the login payload.
+    # --- OpenPGP keypair backends ------------------------------------------
+    # Internxt validates the login-payload OpenPGP keys with openpgp.js, so we
+    # must ship a genuine EdDSA/Ed25519 primary key + ECDH/Curve25519 encryption
+    # subkey ("ed25519Legacy"). Several libraries can produce this; we try them
+    # in order and use the first that works, so login keeps working regardless of
+    # what's installed or which Python version is in use.
 
-        Internxt's server now validates these keys ("keys.ecc.publicKey is not a
-        valid OpenPGP public key"), so placeholders are rejected. This mirrors the
-        official CLI's KeysService.generateNewKeysWithEncrypted: an EdDSA/Ed25519
-        primary key plus an ECDH/Curve25519 encryption subkey, with the public key
-        sent base64-encoded and the armored private key AES-256-GCM encrypted.
-
-        Fresh keys are generated on every login (as the official SDK does); the
-        server preserves any pre-existing account keys, so this is non-destructive.
-        """
-        try:
-            import warnings
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                import pgpy
-                from pgpy.constants import (
-                    PubKeyAlgorithm, KeyFlags, HashAlgorithm,
-                    SymmetricKeyAlgorithm, CompressionAlgorithm, EllipticCurveOID
-                )
-        except ImportError as e:
-            raise RuntimeError(
-                "PGPy is required to log in: Internxt now validates the OpenPGP keys "
-                "sent in the login payload. Install it with: pip install pgpy"
-            ) from e
-
+    def _openpgp_keypair_pgpy(self) -> Tuple[str, str]:
+        """Preferred backend: PGPy. Unavailable on Python 3.13+ (PGPy imports the
+        removed `imghdr` stdlib module), so this raises there and we fall through."""
+        import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
+            import pgpy
+            from pgpy.constants import (
+                PubKeyAlgorithm, KeyFlags, HashAlgorithm,
+                SymmetricKeyAlgorithm, CompressionAlgorithm, EllipticCurveOID
+            )
             # Primary signing/certifying key: EdDSA over Ed25519 (legacy format).
             key = pgpy.PGPKey.new(PubKeyAlgorithm.EdDSA, EllipticCurveOID.Ed25519)
             uid = pgpy.PGPUID.new('inxt@inxt.com')
@@ -500,9 +500,89 @@ class CryptoService:
                 subkey,
                 usage={KeyFlags.EncryptCommunications, KeyFlags.EncryptStorage},
             )
+        return str(key.pubkey), str(key)
 
-        private_key_armored = str(key)
-        public_key_armored = str(key.pubkey)
+    def _openpgp_keypair_native(self) -> Tuple[str, str]:
+        """Zero-dependency backend: serialise the OpenPGP packets ourselves using
+        `cryptography` alone. Works on every supported Python (validated against
+        openpgp.js). See services/openpgp_native.py."""
+        from services.openpgp_native import generate_ed25519legacy_keypair
+        return generate_ed25519legacy_keypair('inxt@inxt.com')
+
+    def _openpgp_keypair_gnupg(self) -> Tuple[str, str]:
+        """Fallback backend: shell out to the system GnuPG via python-gnupg."""
+        import shutil
+        import tempfile
+        import gnupg
+        if not shutil.which('gpg') and not shutil.which('gpg2'):
+            raise RuntimeError("gpg binary not found on PATH")
+        home = tempfile.mkdtemp(prefix='inxt-gpg-')
+        try:
+            gpg = gnupg.GPG(gnupghome=home)
+            params = gpg.gen_key_input(
+                key_type='eddsa', key_curve='ed25519',
+                subkey_type='ecdh', subkey_curve='cv25519',
+                name_email='inxt@inxt.com', no_protection=True,
+            )
+            result = gpg.gen_key(params)
+            if not getattr(result, 'fingerprint', None):
+                raise RuntimeError(f"gpg key generation failed: {result!r}")
+            public = gpg.export_keys(result.fingerprint)
+            # GnuPG 2.1+ refuses to export a secret key without a passphrase even
+            # when the key is unprotected; an empty loopback passphrase satisfies
+            # it and yields the unencrypted armored secret key.
+            private = gpg.export_keys(
+                result.fingerprint, True,  # secret key
+                passphrase='', expect_passphrase=False,
+            )
+            if not public or not private:
+                raise RuntimeError("gpg key export returned empty output")
+            return public, private
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
+    def _generate_openpgp_armored_keypair(self) -> Tuple[str, str]:
+        """Produce (public_key_armored, private_key_armored), trying each backend
+        in preference order. Raises only if every backend fails."""
+        backends = (
+            ('pgpy', self._openpgp_keypair_pgpy),
+            ('native', self._openpgp_keypair_native),
+            ('gnupg', self._openpgp_keypair_gnupg),
+        )
+        errors = []
+        for name, backend in backends:
+            try:
+                public, private = backend()
+                if public and private:
+                    _dbg(f"   🔑 OpenPGP keys via {name} backend")
+                    return public, private
+                errors.append(f"{name}: returned empty keys")
+            except Exception as e:  # ImportError, missing gpg, generation errors…
+                errors.append(f"{name}: {e}")
+        raise RuntimeError(
+            "Could not generate the OpenPGP login keys with any backend. Install "
+            "one of: PGPy (Python <3.13 only), python-gnupg + a gpg binary, or "
+            "ensure `cryptography` supports Ed25519/X25519 for the built-in native "
+            "backend. Details — " + "; ".join(errors)
+        )
+
+    def generate_keys(self, password: str) -> Dict[str, Any]:
+        """
+        Generates a real OpenPGP Ed25519 (legacy) keypair for the login payload.
+
+        Internxt's server validates these keys ("keys.ecc.publicKey is not a valid
+        OpenPGP public key"), so placeholders are rejected. This mirrors the
+        official CLI's KeysService.generateNewKeysWithEncrypted: an EdDSA/Ed25519
+        primary key plus an ECDH/Curve25519 encryption subkey, with the public key
+        sent base64-encoded and the armored private key AES-256-GCM encrypted.
+
+        The keypair itself comes from whichever OpenPGP backend is available
+        (PGPy → native → GnuPG); see _generate_openpgp_armored_keypair.
+
+        Fresh keys are generated on every login (as the official SDK does); the
+        server preserves any pre-existing account keys, so this is non-destructive.
+        """
+        public_key_armored, private_key_armored = self._generate_openpgp_armored_keypair()
 
         public_key_b64 = base64.b64encode(public_key_armored.encode('utf-8')).decode('ascii')
         private_key_encrypted = self._internxt_aes_gcm_encrypt(

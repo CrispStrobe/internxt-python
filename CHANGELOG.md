@@ -3,6 +3,17 @@
 ## Unreleased
 
 ### Added
+- **OpenPGP login keys work on Python 3.13/3.14; PGPy no longer required**
+  (internxt-python issue #10). Login needs a valid OpenPGP `ed25519Legacy`
+  keypair, which was generated with PGPy — but PGPy (unmaintained since 2022)
+  imports the `imghdr` stdlib module removed in Python 3.13, so it crashes on
+  import there. Added a built-in, dependency-free backend that serialises the
+  OpenPGP packets directly with `cryptography` (EdDSA/Ed25519 primary + ECDH/
+  Curve25519 subkey), validated against openpgp.js and GnuPG. Key generation now
+  tries **PGPy → native → GnuPG** and uses the first available, so login works on
+  every supported Python. The native path is also ~3× faster than PGPy. PGPy and
+  `python-gnupg` move to optional `extras_require` (`pip install .[pgpy]` /
+  `.[gnupg]`); neither is needed for a working install.
 - **Implicit auto-login for unattended pipelines** (issue #9): when no valid
   session is stored, commands now log in automatically from `INTERNXT_EMAIL` /
   `INTERNXT_PASSWORD` (+ `INTERNXT_TFA_SECRET` for 2FA), so `… | rcat …` needs no
