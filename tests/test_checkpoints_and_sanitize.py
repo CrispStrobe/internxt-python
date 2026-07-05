@@ -1,5 +1,4 @@
 """Tests for resumable-upload checkpoint helpers and filename sanitization."""
-import json
 import os
 import time
 from pathlib import Path
