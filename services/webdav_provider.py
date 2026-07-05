@@ -1077,6 +1077,11 @@ class InternxtDAVProvider(DAVProvider):
         self.preserve_timestamps = preserve_timestamps
         print(f"🕐 InternxtDAVProvider initialized with timestamp preservation: {preserve_timestamps}")
         self.readonly = False
+        # WebDAV uploads go through per-request temp spool files whose random
+        # paths can never match a resume checkpoint on a retry — skip writing
+        # checkpoints (the in-session part repair pass still runs).
+        from services.drive import drive_service
+        drive_service.resume_uploads = False
         
         print("🔍 WEBDAV: Initializing InternxtDAVProvider...")
         

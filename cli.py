@@ -650,10 +650,13 @@ def move_path(paths: Tuple[str, ...], workers: int, on_conflict: str,
               help='Parallel upload workers for batch directory uploads (1 = serial)')
 @click.option('--chunk-workers', type=int, default=4, show_default=True,
               help='Parallel multipart part PUTs within a single large file (1 = serial)')
+@click.option('--resume/--no-resume', 'resume', default=True, show_default=True,
+              help='Resume interrupted multipart uploads (>= 100 MiB) from their checkpoint '
+                   'instead of restarting from scratch')
 @click.option('--verbose', '-v', is_flag=True, help='Show verbose output')
 def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_conflict: str,
            preserve_timestamps: bool, include: Tuple[str, ...], exclude: Tuple[str, ...],
-           workers: int, chunk_workers: int, verbose: bool):
+           workers: int, chunk_workers: int, resume: bool, verbose: bool):
     """
     Encrypts and uploads local files/folders to a remote path.
 
@@ -693,6 +696,7 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
 
     # Within-file multipart concurrency for single large files (>= 100 MiB).
     drive_service.chunk_workers = max(1, chunk_workers)
+    drive_service.resume_uploads = resume
 
     try:
         click.echo("🔄 Refreshing authentication token...")
@@ -1345,6 +1349,9 @@ def rcat(remote_path: str, on_conflict: str, chunk_workers: int,
 
     # Within-file multipart concurrency for large streams (>= 100 MiB).
     drive_service.chunk_workers = max(1, chunk_workers)
+    # The spool file has a random temp name, so a rerun could never match a
+    # resume checkpoint — skip writing them (in-session part repair still runs).
+    drive_service.resume_uploads = False
 
     spool_path: Optional[str] = None
     try:

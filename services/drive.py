@@ -6,6 +6,7 @@ with path resolution
 
 import os
 import sys
+import json
 import math
 import hashlib
 import fnmatch
@@ -16,6 +17,23 @@ from tqdm import tqdm
 import time
 import uuid
 import threading
+
+import requests
+
+
+class UploadUrlExpiredError(Exception):
+    """A presigned S3 upload URL answered 403 (expired).
+
+    Retrying the same URL is pointless — the network API cannot re-issue URLs
+    for an existing UploadId, so the caller must restart with a fresh
+    files/start (discarding any resume checkpoint that referenced the URLs).
+    """
+
+
+class _ResumeStateInvalidError(Exception):
+    """Server rejected resumed upload state (e.g. the uploads record was
+    purged before files/finish). The checkpoint must be discarded and the
+    upload restarted from scratch."""
 
 try:
     from ..config.config import config_service
@@ -66,6 +84,25 @@ class DriveService:
         # run in parallel. Bytes in flight are additionally bounded by the
         # memory gate (_mem_acquire). Overridable per-run (cli --chunk-workers).
         self.chunk_workers = 4
+
+        # --- Resumable multipart uploads (issue #11) ---
+        # The network API cannot recover an interrupted upload (files/start
+        # always mints a new uuid/UploadId and there is no URL re-issue
+        # endpoint), but nothing forbids finishing one late: files/finish has
+        # no deadline and AES-256-CTR ciphertext is deterministic given the
+        # persisted file index. So for multipart files we checkpoint
+        # {index, uuid, UploadId, urls, completed ETags} to disk and, on a
+        # rerun of the same file, re-encrypt locally (cheap) while skipping
+        # the PUT for parts that already have an ETag. Works until the
+        # presigned URLs expire (server answers 403 → fresh restart).
+        self.resume_uploads = True                        # cli --no-resume disables
+        self.CHECKPOINT_MAX_AGE = 24 * 3600               # presigned URLs won't outlive this
+        # In-session repair: parts that exhausted their per-PUT retries are
+        # re-encrypted (CTR keystream seek) and re-PUT sequentially in up to
+        # this many extra rounds before the upload is declared failed. Rounds
+        # are separated by a flat delay so brief outages can pass.
+        self.UPLOAD_REPAIR_ROUNDS = 2
+        self.UPLOAD_REPAIR_DELAY = 15                     # seconds between repair rounds
 
         # Step B — parallel ranged downloads (opt-in, riskier). When enabled and
         # the file is large enough, a single presigned S3 GET is split into N
@@ -187,19 +224,112 @@ class DriveService:
         Presigned URLs are reusable until they expire, so re-PUTting the same
         part on a transient failure is safe. Only the failing part is retried,
         which is the whole point of multipart for slow/flaky connections.
+        A 403 means the presigned URL itself expired — retrying is pointless
+        (the API cannot re-issue URLs), so that raises UploadUrlExpiredError
+        immediately.
         """
-        last_err = None
+        last_err: Optional[Exception] = None
         for attempt in range(max_retries):
             try:
                 return do_put()
+            except requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code == 403:
+                    raise UploadUrlExpiredError(
+                        f"Part {part_no}/{total_parts}: presigned upload URL expired (HTTP 403)"
+                    ) from e
+                last_err = e
             except Exception as e:
                 last_err = e
-                if attempt < max_retries - 1:
-                    wait = 2 ** attempt
-                    print(f"\n        ⚠️  Part {part_no}/{total_parts} failed "
-                          f"(attempt {attempt + 1}/{max_retries}): {e}; retrying in {wait}s...")
-                    time.sleep(wait)
+            if attempt < max_retries - 1:
+                wait = 2 ** attempt
+                print(f"\n        ⚠️  Part {part_no}/{total_parts} failed "
+                      f"(attempt {attempt + 1}/{max_retries}): {last_err}; retrying in {wait}s...")
+                time.sleep(wait)
         raise Exception(f"Part {part_no}/{total_parts} failed after {max_retries} attempts: {last_err}")
+
+    # ---------- resumable-upload checkpoints ----------
+
+    def _upload_checkpoint_path(self, file_path: Path, bucket_id: str) -> Path:
+        """Checkpoint file for (file path, bucket) — deterministic so a rerun
+        of the same upload finds the previous attempt's state."""
+        checkpoint_dir = self.config.internxt_cli_data_dir / 'upload_checkpoints'
+        cp_id = hashlib.sha256(
+            f"{Path(file_path).resolve()}|{bucket_id}".encode()).hexdigest()[:32]
+        return checkpoint_dir / f"{cp_id}.json"
+
+    def _save_upload_checkpoint(self, cp_path: Path, data: Dict[str, Any]) -> None:
+        """Atomically persist upload state. Best-effort: a checkpoint failure
+        must never fail the upload itself."""
+        try:
+            cp_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = cp_path.with_suffix('.tmp')
+            with open(tmp, 'w') as f:
+                json.dump(data, f)
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+            os.replace(tmp, cp_path)
+        except Exception:
+            pass
+
+    def _load_upload_checkpoint(self, file_path: Path, bucket_id: str, file_size: int,
+                                part_size: int, parts: int) -> Optional[Dict[str, Any]]:
+        """Return a resumable checkpoint for this exact upload, or None.
+
+        The checkpoint is only valid if the file is byte-identical to the
+        interrupted attempt (size + mtime), the part layout matches (the
+        recorded ETags are per-part), and it is younger than
+        CHECKPOINT_MAX_AGE (presigned URLs expire server-side; stale
+        checkpoints would just 403). Invalid checkpoints are deleted.
+        """
+        cp_path = self._upload_checkpoint_path(file_path, bucket_id)
+        try:
+            with open(cp_path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return None
+        try:
+            mtime_ns = Path(file_path).stat().st_mtime_ns
+        except OSError:
+            return None
+        valid = (
+            data.get('version') == 1
+            and data.get('file_size') == file_size
+            and data.get('mtime_ns') == mtime_ns
+            and data.get('bucket_id') == bucket_id
+            and data.get('part_size') == part_size
+            and data.get('parts') == parts
+            and isinstance(data.get('urls'), list) and len(data['urls']) >= parts
+            and bool(data.get('index')) and bool(data.get('uuid'))
+            and data.get('upload_id') is not None
+            and (time.time() - data.get('created', 0)) < self.CHECKPOINT_MAX_AGE
+        )
+        if not valid:
+            self.remove_upload_checkpoint(str(cp_path))
+            return None
+        return data
+
+    def remove_upload_checkpoint(self, checkpoint_file: str) -> None:
+        """Remove an upload checkpoint (idempotent)."""
+        try:
+            Path(checkpoint_file).unlink()
+        except Exception:
+            pass
+
+    def _prune_upload_checkpoints(self) -> None:
+        """Delete checkpoints past CHECKPOINT_MAX_AGE (their presigned URLs
+        are dead anyway). Called opportunistically when a new one is created."""
+        checkpoint_dir = self.config.internxt_cli_data_dir / 'upload_checkpoints'
+        try:
+            for f in checkpoint_dir.glob('*.json'):
+                try:
+                    if time.time() - f.stat().st_mtime > self.CHECKPOINT_MAX_AGE:
+                        f.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
 
     def _perform_network_upload(self, file_path: Path, file_size: int, bucket_id: str,
                                 mnemonic: str, network_auth: tuple,
@@ -213,6 +343,13 @@ class DriveService:
         retried independently); smaller files use a single presigned PUT. The
         stored shard hash is ripemd160(sha256(ciphertext)), matching the
         official clients.
+
+        Multipart uploads are RESUMABLE: state (file index, network uuid,
+        UploadId, presigned URLs, completed ETags) is checkpointed to disk as
+        parts finish, and a rerun of the same file skips already-uploaded
+        parts (re-encrypting locally to recompute the shard hash — the CTR
+        ciphertext is deterministic given the persisted index). Resume works
+        until the presigned URLs expire; a 403 falls back to a fresh upload.
         """
         part_size = self.UPLOAD_PART_SIZE
         use_multipart = file_size >= self.MULTIPART_MIN_SIZE
@@ -221,32 +358,116 @@ class DriveService:
             parts = math.ceil(file_size / part_size)
             if parts > self.MAX_MULTIPARTS:
                 parts = self.MAX_MULTIPARTS
-                part_size = math.ceil(file_size / parts)
+                # Keep part boundaries 16-byte aligned so the repair pass can
+                # seek the CTR keystream to any part offset.
+                part_size = math.ceil(file_size / parts / 16) * 16
 
-        encryptor, file_index_hex = self.crypto.new_upload_cipher(mnemonic, bucket_id)
+        if use_multipart and self.resume_uploads:
+            resume = self._load_upload_checkpoint(file_path, bucket_id, file_size,
+                                                  part_size, parts)
+            if resume is not None:
+                done = len(resume.get('etags') or {})
+                print(f"        🔁 Resuming interrupted upload: "
+                      f"{done}/{parts} part(s) already uploaded")
+                try:
+                    return self._upload_via_network(
+                        file_path, file_size, bucket_id, mnemonic, network_auth,
+                        timeout_seconds, part_size, parts, use_multipart, resume)
+                except (UploadUrlExpiredError, _ResumeStateInvalidError) as e:
+                    print(f"        ⚠️  Resume no longer possible ({e}); "
+                          f"restarting upload from scratch")
+                    self.remove_upload_checkpoint(
+                        str(self._upload_checkpoint_path(file_path, bucket_id)))
+
+        try:
+            return self._upload_via_network(
+                file_path, file_size, bucket_id, mnemonic, network_auth,
+                timeout_seconds, part_size, parts, use_multipart, None)
+        except UploadUrlExpiredError as e:
+            # Fresh URLs expired before the upload finished — the checkpoint
+            # references dead URLs, so drop it rather than 403 again next run.
+            if use_multipart and self.resume_uploads:
+                self.remove_upload_checkpoint(
+                    str(self._upload_checkpoint_path(file_path, bucket_id)))
+            raise Exception(
+                f"Upload failed: {e}. The presigned upload URLs expired before the "
+                f"upload completed (connection too slow for the URL lifetime)."
+            ) from e
+
+    def _upload_via_network(self, file_path: Path, file_size: int, bucket_id: str,
+                            mnemonic: str, network_auth: tuple, timeout_seconds: int,
+                            part_size: int, parts: int, use_multipart: bool,
+                            resume: Optional[Dict[str, Any]]) -> str:
+        """One upload attempt (fresh or resumed). See _perform_network_upload."""
+        resuming = resume is not None
+        single_url = None
+        urls: Optional[List[str]] = None
+        upload_id = None
+        done_etags: Dict[int, str] = {}
+
+        if resume is not None:
+            # Reuse the interrupted attempt's identity: same index → same
+            # key/IV → byte-identical ciphertext, so already-PUT parts and the
+            # recomputed shard hash stay consistent with what the server has.
+            file_index_hex = resume['index']
+            encryptor = self.crypto.new_upload_cipher_from_index(
+                mnemonic, bucket_id, file_index_hex)
+            file_network_uuid = resume['uuid']
+            upload_id = resume['upload_id']
+            urls = resume['urls']
+            done_etags = {int(k): v for k, v in (resume.get('etags') or {}).items()}
+        else:
+            encryptor, file_index_hex = self.crypto.new_upload_cipher(mnemonic, bucket_id)
+            if use_multipart:
+                print(f"        Multipart upload: {parts} part(s) of "
+                      f"{self._format_size(part_size)}")
+            start_response = self.api.start_upload(bucket_id, file_size,
+                                                   auth=network_auth, parts=parts)
+            upload_details = start_response['uploads'][0]
+            file_network_uuid = upload_details['uuid']
+            if use_multipart:
+                urls = upload_details.get('urls')
+                upload_id = upload_details.get('UploadId') or upload_details.get('uploadId')
+                if not urls or upload_id is None:
+                    raise ValueError("Server did not return multipart URLs/UploadId for a multipart upload")
+                if len(urls) < parts:
+                    raise ValueError(f"Server returned {len(urls)} part URL(s), expected {parts}")
+            else:
+                single_url = upload_details.get('url')
+                if not single_url:
+                    raise ValueError("Server did not return an upload URL")
+
         sha = hashlib.sha256()
 
-        if use_multipart:
-            print(f"        Multipart upload: {parts} part(s) of {self._format_size(part_size)}")
-
-        start_response = self.api.start_upload(bucket_id, file_size, auth=network_auth, parts=parts)
-        upload_details = start_response['uploads'][0]
-        file_network_uuid = upload_details['uuid']
-
-        single_url = None
-        urls = None
-        upload_id = None
-        if use_multipart:
-            urls = upload_details.get('urls')
-            upload_id = upload_details.get('UploadId') or upload_details.get('uploadId')
-            if not urls or upload_id is None:
-                raise ValueError("Server did not return multipart URLs/UploadId for a multipart upload")
-            if len(urls) < parts:
-                raise ValueError(f"Server returned {len(urls)} part URL(s), expected {parts}")
-        else:
-            single_url = upload_details.get('url')
-            if not single_url:
-                raise ValueError("Server did not return an upload URL")
+        # Checkpoint (multipart only): everything a later process needs to
+        # finish this upload. Updated as each part's ETag comes back.
+        checkpoint: Optional[Dict[str, Any]] = None
+        checkpoint_path: Optional[Path] = None
+        cp_lock = threading.Lock()
+        if use_multipart and self.resume_uploads:
+            checkpoint_path = self._upload_checkpoint_path(file_path, bucket_id)
+            try:
+                mtime_ns = file_path.stat().st_mtime_ns
+            except OSError:
+                mtime_ns = None
+            checkpoint = {
+                'version': 1,
+                'file_path': str(file_path),
+                'file_size': file_size,
+                'mtime_ns': mtime_ns,
+                'bucket_id': bucket_id,
+                'part_size': part_size,
+                'parts': parts,
+                'index': file_index_hex,
+                'uuid': file_network_uuid,
+                'upload_id': upload_id,
+                'urls': urls,
+                'etags': {str(k): v for k, v in done_etags.items()},
+                'created': resume['created'] if resume is not None else time.time(),
+            }
+            if not resuming:
+                self._prune_upload_checkpoints()
+                self._save_upload_checkpoint(checkpoint_path, checkpoint)
 
         # Multipart parts finish out of order, so we pre-size the manifest and
         # assign each ETag BY INDEX. The crypto (encryptor.update + sha.update)
@@ -256,10 +477,22 @@ class DriveService:
         parts_manifest: List[Optional[Dict[str, Any]]] = [None] * parts
         bytes_done = 0
 
-        # Failures from worker threads are collected here and surfaced after
-        # join (the producer also stops dispatching once one is seen).
+        def _record_etag(part_number: int, etag: str) -> None:
+            parts_manifest[part_number - 1] = {'PartNumber': part_number, 'ETag': etag}
+            if checkpoint is not None and checkpoint_path is not None:
+                with cp_lock:
+                    checkpoint['etags'][str(part_number)] = etag
+                    self._save_upload_checkpoint(checkpoint_path, checkpoint)
+
+        # Failures from worker threads are collected here; once one is seen the
+        # producer stops DISPATCHING new PUTs but keeps reading/encrypting to
+        # EOF so the cipher/hash state completes — undispatched parts are then
+        # recovered by the repair pass (or a later resumed run).
         part_errors: List[Tuple[int, BaseException]] = []
         errors_lock = threading.Lock()
+        # A 403 (expired presigned URL) is unrecoverable within this attempt;
+        # it aborts dispatch and repair immediately.
+        url_expired = threading.Event()
         # Cap parts in flight to n_workers (each ~part_size); _mem_acquire adds
         # the RAM ceiling on bytes in flight.
         inflight = threading.BoundedSemaphore(n_workers)
@@ -269,8 +502,12 @@ class DriveService:
                 etag = self._put_with_retry(
                     lambda: self.api.upload_part(url, data, timeout_seconds),
                     idx + 1, parts)
-                parts_manifest[idx] = {'PartNumber': idx + 1, 'ETag': etag}
-            except BaseException as e:  # noqa: BLE001 — re-raised by the producer after join
+                _record_etag(idx + 1, etag)
+            except UploadUrlExpiredError as e:
+                url_expired.set()
+                with errors_lock:
+                    part_errors.append((idx, e))
+            except BaseException as e:  # noqa: BLE001 — surfaced by the producer after join
                 with errors_lock:
                     part_errors.append((idx, e))
             finally:
@@ -279,16 +516,17 @@ class DriveService:
 
         executor = (concurrent.futures.ThreadPoolExecutor(max_workers=n_workers)
                     if use_multipart else None)
+        dispatch = True
         try:
             with open(file_path, 'rb') as f, tqdm(
-                    total=file_size, unit='B', unit_scale=True, desc='        Uploading',
+                    total=file_size, unit='B', unit_scale=True,
+                    desc='        Resuming' if resuming else '        Uploading',
                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}] ETA: {remaining}',
                     leave=False) as pbar:
                 for part_index in range(parts):
-                    # Stop the producer early if a dispatched part already failed.
                     with errors_lock:
                         if part_errors:
-                            break
+                            dispatch = False
                     remaining = file_size - bytes_done
                     read_size = remaining if not use_multipart else min(part_size, remaining)
                     plaintext = f.read(read_size)
@@ -300,11 +538,21 @@ class DriveService:
 
                     if use_multipart:
                         assert urls is not None and executor is not None  # validated above
-                        # Reserve a slot (≤ n_workers in flight) and RAM for this
-                        # part before handing the PUT off to a worker thread.
-                        inflight.acquire()
-                        self._mem_acquire(len(ciphertext))
-                        executor.submit(_put_part, part_index, urls[part_index], ciphertext)
+                        already = done_etags.get(part_index + 1)
+                        if already is not None:
+                            # Resumed part: ciphertext is identical to what was
+                            # PUT last time (same index → same keystream), so
+                            # only the hash needed recomputing.
+                            parts_manifest[part_index] = {'PartNumber': part_index + 1,
+                                                          'ETag': already}
+                        elif dispatch and not url_expired.is_set():
+                            # Reserve a slot (≤ n_workers in flight) and RAM for
+                            # this part before handing the PUT off to a worker.
+                            inflight.acquire()
+                            self._mem_acquire(len(ciphertext))
+                            executor.submit(_put_part, part_index, urls[part_index], ciphertext)
+                        # else: leave manifest[part_index] None — the repair
+                        # pass (or a resumed run) re-encrypts and re-PUTs it.
                     else:
                         self._put_with_retry(
                             lambda data=ciphertext: self.api.upload_chunk(single_url, data),
@@ -314,11 +562,6 @@ class DriveService:
             if executor is not None:
                 executor.shutdown(wait=True)
 
-        if part_errors:
-            part_errors.sort(key=lambda t: t[0])
-            idx, err = part_errors[0]
-            raise Exception(f"Multipart upload failed on part {idx + 1}/{parts}: {err}")
-
         # AES-CTR has no padding, so finalize() is normally empty; fold it in anyway.
         tail = encryptor.finalize()
         if tail:
@@ -327,14 +570,91 @@ class DriveService:
         if bytes_done != file_size:
             raise IOError(f"Read {bytes_done} bytes but file size is {file_size}")
 
+        if use_multipart:
+            assert urls is not None  # validated at start (fresh) or by the checkpoint (resume)
+            missing = [i for i in range(parts) if parts_manifest[i] is None]
+            if missing and not url_expired.is_set():
+                missing = self._repair_missing_parts(
+                    file_path, file_size, bucket_id, mnemonic, file_index_hex,
+                    part_size, parts, urls, missing, timeout_seconds,
+                    _record_etag, url_expired)
+            if url_expired.is_set() and missing:
+                raise UploadUrlExpiredError(
+                    f"presigned URL(s) expired with {len(missing)} part(s) outstanding")
+            if missing:
+                with errors_lock:
+                    part_errors.sort(key=lambda t: t[0])
+                    first_err = part_errors[0][1] if part_errors else 'part(s) not uploaded'
+                hint = (" Progress was checkpointed — re-running the same upload "
+                        "will resume from the uploaded parts." if checkpoint is not None else "")
+                raise Exception(
+                    f"Multipart upload failed on part {missing[0] + 1}/{parts}: "
+                    f"{first_err}.{hint}")
+
         content_hash = self.crypto.shard_hash_from_sha256(sha.digest())
         shard: Dict[str, Any] = {'hash': content_hash, 'uuid': file_network_uuid}
         if use_multipart:
             shard['UploadId'] = upload_id
             shard['parts'] = parts_manifest
         finish_payload = {'index': file_index_hex, 'shards': [shard]}
-        finish_response = self.api.finish_upload(bucket_id, finish_payload, auth=network_auth)
+        try:
+            finish_response = self.api.finish_upload(bucket_id, finish_payload,
+                                                     auth=network_auth)
+        except ValueError as e:
+            # _make_request maps HTTP-status errors to ValueError. On a resumed
+            # upload that means the server no longer accepts the old state
+            # (e.g. the uploads record was purged) — restart fresh.
+            if resuming:
+                raise _ResumeStateInvalidError(str(e)) from e
+            raise
+        if checkpoint_path is not None:
+            self.remove_upload_checkpoint(str(checkpoint_path))
         return finish_response['id']
+
+    def _repair_missing_parts(self, file_path: Path, file_size: int, bucket_id: str,
+                              mnemonic: str, file_index_hex: str, part_size: int,
+                              parts: int, urls: List[str], missing: List[int],
+                              timeout_seconds: int, record_etag, url_expired) -> List[int]:
+        """In-session recovery: re-PUT parts that exhausted their retries.
+
+        Each missing part's ciphertext is regenerated independently by seeking
+        the CTR keystream to the part offset (deterministic — identical bytes
+        to the producer's output), so nothing had to be kept in memory. Parts
+        are retried sequentially, in up to UPLOAD_REPAIR_ROUNDS rounds spaced
+        UPLOAD_REPAIR_DELAY apart, so brief outages can pass. Returns the
+        parts still missing; sets ``url_expired`` and stops early on a 403.
+        """
+        for round_no in range(self.UPLOAD_REPAIR_ROUNDS):
+            if not missing or url_expired.is_set():
+                break
+            time.sleep(self.UPLOAD_REPAIR_DELAY)
+            print(f"        🔧 Repair round {round_no + 1}/{self.UPLOAD_REPAIR_ROUNDS}: "
+                  f"retrying {len(missing)} failed part(s)...")
+            still_missing: List[int] = []
+            for pos, idx in enumerate(missing):
+                offset = idx * part_size
+                try:
+                    with open(file_path, 'rb') as f:
+                        f.seek(offset)
+                        plaintext = f.read(min(part_size, file_size - offset))
+                    enc = self.crypto.new_upload_encryptor_at(
+                        mnemonic, bucket_id, file_index_hex, offset)
+                    ciphertext = enc.update(plaintext) + enc.finalize()
+                    etag = self._put_with_retry(
+                        lambda url=urls[idx], data=ciphertext:
+                            self.api.upload_part(url, data, timeout_seconds),
+                        idx + 1, parts)
+                    record_etag(idx + 1, etag)
+                except UploadUrlExpiredError:
+                    url_expired.set()
+                    still_missing.append(idx)
+                    still_missing.extend(missing[pos + 1:])
+                    return still_missing
+                except Exception as e:
+                    print(f"        ⚠️  Repair of part {idx + 1}/{parts} failed: {e}")
+                    still_missing.append(idx)
+            missing = still_missing
+        return missing
 
     # ========== PATH RESOLUTION ==========
 
@@ -956,39 +1276,6 @@ class DriveService:
             'folders_copied': copied_folders,
         }
 
-    def create_upload_checkpoint(self, file_path: Path, target_uuid: str) -> str:
-        """
-        Create a checkpoint file for resumable uploads.
-        Returns checkpoint file path.
-        """
-        checkpoint_dir = self.config.internxt_cli_data_dir / 'upload_checkpoints'
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-        # Non-cryptographic ID for checkpoint file naming.
-        checkpoint_id = hashlib.sha256(f"{file_path}{target_uuid}".encode()).hexdigest()[:32]
-        checkpoint_file = checkpoint_dir / f"{checkpoint_id}.json"
-        
-        checkpoint_data = {
-            'file_path': str(file_path),
-            'target_uuid': target_uuid,
-            'file_size': file_path.stat().st_size,
-            'timestamp': time.time(),
-            'status': 'started'
-        }
-        
-        import json
-        with open(checkpoint_file, 'w') as f:
-            json.dump(checkpoint_data, f)
-        
-        return str(checkpoint_file)
-
-    def remove_upload_checkpoint(self, checkpoint_file: str):
-        """Remove upload checkpoint after successful upload."""
-        try:
-            Path(checkpoint_file).unlink()
-        except Exception:
-            pass
-        
     def sanitize_filename(self, filename: str) -> str:
         """
         Sanitize filename for upload, removing or replacing problematic characters.

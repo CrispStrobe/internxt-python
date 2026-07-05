@@ -30,6 +30,7 @@ This is an unofficial, open-source project and is **not** affiliated with, endor
   - ✅ **File operations**: Upload, download with progress indicators.
   - ✅ **Stream from stdin (`rcat`)**: Pipe data straight to a Drive file (rclone-`rcat` style) for unattended backups — `mariadb-dump | xz | cli.py rcat /backups/db.xz`.
   - ✅ **Large files**: Streaming encrypt/upload and decrypt/download keep memory bounded (a few MB) regardless of file size; files ≥ 100 MiB **automatically** use true multipart upload (30 MB parts, uploaded in parallel and each retried independently) for resilient transfers on slow/flaky connections. Parallel **ranged downloads** are available opt-in via `--ranged`.
+  - ✅ **Resumable uploads**: Interrupted multipart uploads (≥ 100 MiB) are checkpointed as parts complete — a failed part is first repaired in-session (the AES-CTR keystream is seekable, so only that part is re-encrypted and re-PUT), and if the process dies, **re-running the same upload resumes it**: already-uploaded parts are skipped (no official Internxt client can do this). Resume works until the presigned URLs expire, then falls back cleanly to a fresh upload. Opt out with `--no-resume`.
   - ✅ **Folder management**: Create and organize folders.
   - ✅ **Zero-knowledge encryption**: AES-256-CTR client-side encryption.
 

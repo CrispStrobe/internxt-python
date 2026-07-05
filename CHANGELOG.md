@@ -3,6 +3,25 @@
 ## Unreleased
 
 ### Added
+- **Resumable multipart uploads** (internxt-python issue #11). No official
+  Internxt client can recover an interrupted upload — the network API's
+  `files/start` always mints a new uuid/UploadId and there is no endpoint to
+  re-issue presigned URLs — but `files/finish` has no deadline and the
+  AES-256-CTR ciphertext is deterministic given the file index. The CLI now
+  exploits this: for multipart uploads (≥ 100 MiB) it checkpoints
+  `{index, uuid, UploadId, presigned URLs, completed ETags}` to
+  `upload_checkpoints/` as parts finish, and re-running the same upload
+  re-encrypts locally (cheap, no network) while **skipping the PUT for parts
+  already uploaded**, then finishes normally. Works until the presigned URLs
+  expire (HTTP 403 → clean fallback to a fresh upload; ditto if the server
+  rejects the stale state at finish). Disable with `--no-resume`.
+- **In-session part repair**: a part that exhausts its per-PUT retries no
+  longer aborts the whole upload. The producer still streams to the end
+  (completing the cipher/hash state), then a repair pass re-encrypts just the
+  failed parts by seeking the CTR keystream to their offset and re-PUTs them
+  (2 rounds, 15 s apart), so brief outages survive without restarting. Only
+  if repair also fails does the upload error out — with its progress
+  checkpointed for resume.
 - **OpenPGP login keys work on Python 3.13/3.14; PGPy no longer required**
   (internxt-python issue #10). Login needs a valid OpenPGP `ed25519Legacy`
   keypair, which was generated with PGPy — but PGPy (unmaintained since 2022)

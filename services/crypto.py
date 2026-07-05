@@ -211,6 +211,45 @@ class CryptoService:
         cipher = Cipher(algorithms.AES(file_key), modes.CTR(iv), backend=self.backend)
         return cipher.encryptor(), index.hex()
 
+    def new_upload_cipher_from_index(self, mnemonic: str, bucket_id: str,
+                                     file_index_hex: str) -> Any:
+        """
+        Recreate the streaming upload encryptor for a KNOWN file index.
+
+        Key and IV derive deterministically from (mnemonic, bucket_id, index),
+        so re-encrypting the same plaintext with the same index reproduces
+        byte-identical ciphertext. This is what makes upload resume possible:
+        a restarted upload re-derives the cipher from the index persisted in
+        its checkpoint instead of minting a fresh random one.
+        """
+        index = bytes.fromhex(file_index_hex)
+        file_key = self.generate_file_key(mnemonic, bucket_id, index)
+        iv = index[:16]
+        cipher = Cipher(algorithms.AES(file_key), modes.CTR(iv), backend=self.backend)
+        return cipher.encryptor()
+
+    def new_upload_encryptor_at(self, mnemonic: str, bucket_id: str,
+                                file_index_hex: str, offset: int) -> Any:
+        """
+        Create an AES-256-CTR encryptor whose keystream is positioned at a
+        16-byte-aligned byte ``offset`` into the file.
+
+        The CTR keystream is identical for encryption and decryption, so this
+        mirrors new_download_decryptor_at: counter block for byte offset O is
+        ``initial_counter + O // 16`` (128-bit big-endian, with wraparound).
+        Used by the upload repair pass to regenerate a single failed part's
+        ciphertext without re-encrypting from byte 0.
+        """
+        if offset % 16 != 0:
+            raise ValueError(f"CTR seek offset must be 16-byte aligned, got {offset}")
+        index = bytes.fromhex(file_index_hex)
+        file_key = self.generate_file_key(mnemonic, bucket_id, index)
+        iv = index[:16]
+        counter = (int.from_bytes(iv, 'big') + (offset // 16)) & ((1 << 128) - 1)
+        seeked_iv = counter.to_bytes(16, 'big')
+        cipher = Cipher(algorithms.AES(file_key), modes.CTR(seeked_iv), backend=self.backend)
+        return cipher.encryptor()
+
     def shard_hash_from_sha256(self, sha256_digest: bytes) -> str:
         """
         Compute the network shard content hash from a completed sha256 digest.

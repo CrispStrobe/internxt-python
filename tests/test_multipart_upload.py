@@ -13,6 +13,7 @@ finish payload shape, and that the hash matches the real protocol.
 import hashlib
 import os
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -90,13 +91,14 @@ def _run_upload(file_size, part_size=30 * 1024 * 1024, multipart_min=100 * 1024 
         return {'id': 'NETFILE'}
 
     try:
-        with patch.object(drive_service, 'UPLOAD_PART_SIZE', part_size), \
+        with tempfile.TemporaryDirectory() as data_dir, \
+             patch.object(drive_service.config, 'internxt_cli_data_dir', Path(data_dir)), \
+             patch.object(drive_service, 'UPLOAD_PART_SIZE', part_size), \
              patch.object(drive_service, 'MULTIPART_MIN_SIZE', multipart_min), \
              patch.object(drive_service.api, 'start_upload', side_effect=fake_start_upload), \
              patch.object(drive_service.api, 'upload_part', side_effect=fake_upload_part), \
              patch.object(drive_service.api, 'upload_chunk', side_effect=fake_upload_chunk), \
              patch.object(drive_service.api, 'finish_upload', side_effect=fake_finish):
-            from pathlib import Path
             fid = drive_service._perform_network_upload(
                 Path(tmp.name), file_size, '00' * 12,
                 ('abandon abandon abandon abandon abandon abandon '

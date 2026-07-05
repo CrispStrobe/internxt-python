@@ -101,7 +101,11 @@ def _run_multipart(file_size, part_size, multipart_min, chunk_workers,
             obs['peak_mem'] = max(obs['peak_mem'], drive_service._mem_reserved)
 
     try:
-        with patch.object(drive_service, 'UPLOAD_PART_SIZE', part_size), \
+        with tempfile.TemporaryDirectory() as data_dir, \
+             patch.object(drive_service.config, 'internxt_cli_data_dir', Path(data_dir)), \
+             patch.object(drive_service, 'UPLOAD_REPAIR_ROUNDS', 0), \
+             patch.object(drive_service, 'UPLOAD_REPAIR_DELAY', 0), \
+             patch.object(drive_service, 'UPLOAD_PART_SIZE', part_size), \
              patch.object(drive_service, 'MULTIPART_MIN_SIZE', multipart_min), \
              patch.object(drive_service, 'chunk_workers', chunk_workers), \
              patch.object(drive_service, '_mem_acquire', side_effect=tracking_acquire), \
