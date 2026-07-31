@@ -126,6 +126,7 @@ class _Env:
         with patch.object(drive_service.config, 'internxt_cli_data_dir', self.data_dir), \
              patch.object(drive_service, 'UPLOAD_PART_SIZE', PART_SIZE), \
              patch.object(drive_service, 'MULTIPART_MIN_SIZE', MULTIPART_MIN), \
+             patch.object(drive_service, 'multipart_uploads', True), \
              patch.object(drive_service, 'UPLOAD_REPAIR_DELAY', 0), \
              patch.object(drive_service, 'resume_uploads', resume), \
              patch.object(drive_service, '_put_with_retry', side_effect=fast_retry), \

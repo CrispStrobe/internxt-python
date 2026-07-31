@@ -71,13 +71,13 @@ class DriveService:
 
         self.TWENTY_GIGABYTES = 20 * 1024 * 1024 * 1024   # 20GB limit
         # Streaming-upload tuning (matches the official clients):
-        # the network API rejects multipart for files < 100 MiB, and drive-web
-        # uploads larger files in 30 MB parts (one continuous AES-CTR keystream
-        # sliced into S3 parts). RAM use during upload is bounded by the part
-        # size, not the file size.
+        # Multipart is retained as an explicit opt-in because the current
+        # gateway stalls on large multipart sessions. The ordinary single PUT
+        # path remains the safe default for every file size.
         self.MULTIPART_MIN_SIZE = 100 * 1024 * 1024       # server multipart floor
         self.UPLOAD_PART_SIZE = 30 * 1024 * 1024          # 30MB parts
         self.MAX_MULTIPARTS = 10000                       # server part-count ceiling
+        self.multipart_uploads = False                   # cli --multipart opts in
         # Within-file concurrency: how many multipart part PUTs may be in
         # flight at once for a SINGLE large file. The safe default is serial;
         # concurrent PUTs remain available for explicit testing/tuning with
@@ -353,7 +353,7 @@ class DriveService:
         until the presigned URLs expire; a 403 falls back to a fresh upload.
         """
         part_size = self.UPLOAD_PART_SIZE
-        use_multipart = file_size >= self.MULTIPART_MIN_SIZE
+        use_multipart = self.multipart_uploads and file_size >= self.MULTIPART_MIN_SIZE
         parts = 1
         if use_multipart:
             parts = math.ceil(file_size / part_size)
@@ -1348,7 +1348,8 @@ class DriveService:
         # reservation here for those files — it would deadlock the per-part
         # acquires against this one. Single-PUT (small) files have no internal
         # gate, so they reserve here.
-        use_internal_gate = file_size >= self.MULTIPART_MIN_SIZE
+        use_internal_gate = (self.multipart_uploads
+                             and file_size >= self.MULTIPART_MIN_SIZE)
         mem_need = self.UPLOAD_PART_SIZE * 2
         if not use_internal_gate:
             self._mem_acquire(mem_need)

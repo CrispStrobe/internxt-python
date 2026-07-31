@@ -95,6 +95,7 @@ def _run_upload(file_size, part_size=30 * 1024 * 1024, multipart_min=100 * 1024 
              patch.object(drive_service.config, 'internxt_cli_data_dir', Path(data_dir)), \
              patch.object(drive_service, 'UPLOAD_PART_SIZE', part_size), \
              patch.object(drive_service, 'MULTIPART_MIN_SIZE', multipart_min), \
+             patch.object(drive_service, 'multipart_uploads', True), \
              patch.object(drive_service.api, 'start_upload', side_effect=fake_start_upload), \
              patch.object(drive_service.api, 'upload_part', side_effect=fake_upload_part), \
              patch.object(drive_service.api, 'upload_chunk', side_effect=fake_upload_chunk), \

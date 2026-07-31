@@ -107,6 +107,7 @@ def _run_multipart(file_size, part_size, multipart_min, chunk_workers,
              patch.object(drive_service, 'UPLOAD_REPAIR_DELAY', 0), \
              patch.object(drive_service, 'UPLOAD_PART_SIZE', part_size), \
              patch.object(drive_service, 'MULTIPART_MIN_SIZE', multipart_min), \
+             patch.object(drive_service, 'multipart_uploads', True), \
              patch.object(drive_service, 'chunk_workers', chunk_workers), \
              patch.object(drive_service, '_mem_acquire', side_effect=tracking_acquire), \
              patch.object(drive_service, '_mem_release', side_effect=real_release), \

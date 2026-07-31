@@ -650,13 +650,15 @@ def move_path(paths: Tuple[str, ...], workers: int, on_conflict: str,
               help='Parallel upload workers for batch directory uploads (1 = serial)')
 @click.option('--chunk-workers', type=int, default=1, show_default=True,
               help='Parallel multipart part PUTs within a single large file (1 = serial; use 4+ for concurrency testing)')
+@click.option('--multipart/--no-multipart', default=False, show_default=True,
+              help='Use true S3 multipart for files >= 100 MiB (opt-in; default is one ordinary PUT)')
 @click.option('--resume/--no-resume', 'resume', default=True, show_default=True,
               help='Resume interrupted multipart uploads (>= 100 MiB) from their checkpoint '
                    'instead of restarting from scratch')
 @click.option('--verbose', '-v', is_flag=True, help='Show verbose output')
 def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_conflict: str,
            preserve_timestamps: bool, include: Tuple[str, ...], exclude: Tuple[str, ...],
-           workers: int, chunk_workers: int, resume: bool, verbose: bool):
+           workers: int, chunk_workers: int, multipart: bool, resume: bool, verbose: bool):
     """
     Encrypts and uploads local files/folders to a remote path.
 
@@ -694,7 +696,8 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
         if exclude_patterns:
             click.echo(f"🚫 Exclude filters: {', '.join(exclude_patterns)}")
 
-    # Within-file multipart concurrency for single large files (>= 100 MiB).
+    # Multipart is opt-in; the default uploads any size with one ordinary PUT.
+    drive_service.multipart_uploads = multipart
     drive_service.chunk_workers = max(1, chunk_workers)
     drive_service.resume_uploads = resume
 
@@ -1296,11 +1299,13 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
               help='Action if the target file already exists')
 @click.option('--chunk-workers', type=int, default=1, show_default=True,
               help='Parallel multipart part PUTs within the file (1 = serial; default: 1)')
+@click.option('--multipart/--no-multipart', default=False, show_default=True,
+              help='Use true S3 multipart for streams >= 100 MiB (opt-in; default is one ordinary PUT)')
 @click.option('--temp-dir', type=click.Path(file_okay=False), default=None,
               help='Directory for the temporary spool file (default: system temp / $TMPDIR). '
                    'The whole stream is buffered here before upload — ensure enough free space.')
 @click.option('--verbose', '-v', is_flag=True, help='Show verbose output')
-def rcat(remote_path: str, on_conflict: str, chunk_workers: int,
+def rcat(remote_path: str, on_conflict: str, chunk_workers: int, multipart: bool,
          temp_dir: Optional[str], verbose: bool):
     """Read data from standard input and upload it to a single file on Drive.
 
@@ -1347,7 +1352,8 @@ def rcat(remote_path: str, on_conflict: str, chunk_workers: int,
         click.echo(f"❌ REMOTE_PATH must include a filename: '{remote_path}'", err=True)
         sys.exit(1)
 
-    # Within-file multipart concurrency for large streams (>= 100 MiB).
+    # Multipart is opt-in; the default stream upload uses one ordinary PUT.
+    drive_service.multipart_uploads = multipart
     drive_service.chunk_workers = max(1, chunk_workers)
     # The spool file has a random temp name, so a rerun could never match a
     # resume checkpoint — skip writing them (in-session part repair still runs).
