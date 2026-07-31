@@ -83,7 +83,9 @@ class DriveService:
         # hash stay strictly sequential in the producer; only the network PUTs
         # run in parallel. Bytes in flight are additionally bounded by the
         # memory gate (_mem_acquire). Overridable per-run (cli --chunk-workers).
-        self.chunk_workers = 4
+        # Serial is the gateway-safe default. Concurrent multipart PUTs remain
+        # available as an explicit per-run opt-in via --chunk-workers N.
+        self.chunk_workers = 1
         self.verbose = False                             # CLI --verbose timing diagnostics
 
         # --- Resumable multipart uploads (issue #11) ---

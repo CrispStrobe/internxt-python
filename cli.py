@@ -648,8 +648,8 @@ def move_path(paths: Tuple[str, ...], workers: int, on_conflict: str,
 @click.option('--exclude', multiple=True, help='Exclude files matching pattern (e.g., --exclude "*.tmp" --exclude ".DS_Store")')
 @click.option('--workers', '-w', type=int, default=4, show_default=True,
               help='Parallel upload workers for batch directory uploads (1 = serial)')
-@click.option('--chunk-workers', type=int, default=4, show_default=True,
-              help='Parallel multipart part PUTs within a single large file (1 = serial)')
+@click.option('--chunk-workers', type=int, default=1, show_default=True,
+              help='Parallel multipart part PUTs within a single large file (1 = serial; default)')
 @click.option('--resume/--no-resume', 'resume', default=True, show_default=True,
               help='Resume interrupted multipart uploads (>= 100 MiB) from their checkpoint '
                    'instead of restarting from scratch')
@@ -1295,8 +1295,8 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
 @click.option('--on-conflict', type=click.Choice(['overwrite', 'skip'], case_sensitive=False),
               default='overwrite', show_default=True,
               help='Action if the target file already exists')
-@click.option('--chunk-workers', type=int, default=4, show_default=True,
-              help='Parallel multipart part PUTs within the file (1 = serial)')
+@click.option('--chunk-workers', type=int, default=1, show_default=True,
+              help='Parallel multipart part PUTs within the file (1 = serial; default)')
 @click.option('--temp-dir', type=click.Path(file_okay=False), default=None,
               help='Directory for the temporary spool file (default: system temp / $TMPDIR). '
                    'The whole stream is buffered here before upload — ensure enough free space.')
@@ -1441,8 +1441,8 @@ def rcat(remote_path: str, on_conflict: str, chunk_workers: int,
 @click.option('--on-conflict', type=click.Choice(['overwrite', 'skip'], case_sensitive=False), default='overwrite', help='Action if local file exists')
 @click.option('--ranged/--no-ranged', default=False, show_default=True,
               help='Fetch large files (>=100 MiB) as parallel byte ranges (falls back to a single stream if the server ignores Range)')
-@click.option('--chunk-workers', type=int, default=4, show_default=True,
-              help='Parallel ranged-download workers within a single large file')
+@click.option('--chunk-workers', type=int, default=1, show_default=True,
+              help='Parallel ranged-download workers within a single large file (1 = serial; default)')
 @click.option('--verbose', '-v', is_flag=True, help='Show verbose output')
 def download(file_uuid: str, destination: str, preserve_timestamps: bool, on_conflict: str,
              ranged: bool, chunk_workers: int, verbose: bool):
@@ -1652,8 +1652,8 @@ def list_path(path: str, detailed: bool, show_all: bool, json_out: bool):
 @click.option('--exclude', multiple=True, help='Exclude files matching pattern')
 @click.option('--ranged/--no-ranged', default=False, show_default=True,
               help='Fetch large files (>=100 MiB) as parallel byte ranges (falls back to a single stream if the server ignores Range)')
-@click.option('--chunk-workers', type=int, default=4, show_default=True,
-              help='Parallel ranged-download workers within a single large file')
+@click.option('--chunk-workers', type=int, default=1, show_default=True,
+              help='Parallel ranged-download workers within a single large file (1 = serial; default)')
 @click.option('--verbose', '-v', is_flag=True, help='Show verbose output')
 def download_path(path: str, destination: Optional[str], recursive: bool, on_conflict: str,
                   preserve_timestamps: bool, include: Tuple[str], exclude: Tuple[str],
