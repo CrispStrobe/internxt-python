@@ -696,6 +696,7 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
 
     # Within-file multipart concurrency for single large files (>= 100 MiB).
     drive_service.chunk_workers = max(1, chunk_workers)
+    drive_service.verbose = verbose
     drive_service.resume_uploads = resume
 
     try:
@@ -1349,6 +1350,7 @@ def rcat(remote_path: str, on_conflict: str, chunk_workers: int,
 
     # Within-file multipart concurrency for large streams (>= 100 MiB).
     drive_service.chunk_workers = max(1, chunk_workers)
+    drive_service.verbose = verbose
     # The spool file has a random temp name, so a rerun could never match a
     # resume checkpoint — skip writing them (in-session part repair still runs).
     drive_service.resume_uploads = False

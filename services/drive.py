@@ -84,6 +84,7 @@ class DriveService:
         # run in parallel. Bytes in flight are additionally bounded by the
         # memory gate (_mem_acquire). Overridable per-run (cli --chunk-workers).
         self.chunk_workers = 4
+        self.verbose = False                             # CLI --verbose timing diagnostics
 
         # --- Resumable multipart uploads (issue #11) ---
         # The network API cannot recover an interrupted upload (files/start
@@ -421,8 +422,11 @@ class DriveService:
             if use_multipart:
                 print(f"        Multipart upload: {parts} part(s) of "
                       f"{self._format_size(part_size)}")
+            stage_started = time.perf_counter()
             start_response = self.api.start_upload(bucket_id, file_size,
                                                    auth=network_auth, parts=parts)
+            if self.verbose:
+                print(f"        [timing] files/start: {time.perf_counter() - stage_started:.3f}s")
             upload_details = start_response['uploads'][0]
             file_network_uuid = upload_details['uuid']
             if use_multipart:
@@ -591,12 +595,16 @@ class DriveService:
                     f"Multipart upload failed on part {missing[0] + 1}/{parts}: "
                     f"{first_err}.{hint}")
 
+        if self.verbose:
+            print(f"        [timing] parts complete; submitting files/finish")
+
         content_hash = self.crypto.shard_hash_from_sha256(sha.digest())
         shard: Dict[str, Any] = {'hash': content_hash, 'uuid': file_network_uuid}
         if use_multipart:
             shard['UploadId'] = upload_id
             shard['parts'] = parts_manifest
         finish_payload = {'index': file_index_hex, 'shards': [shard]}
+        finish_started = time.perf_counter()
         try:
             finish_response = self.api.finish_upload(bucket_id, finish_payload,
                                                      auth=network_auth)
@@ -607,6 +615,8 @@ class DriveService:
             if resuming:
                 raise _ResumeStateInvalidError(str(e)) from e
             raise
+        if self.verbose:
+            print(f"        [timing] files/finish: {time.perf_counter() - finish_started:.3f}s")
         if checkpoint_path is not None:
             self.remove_upload_checkpoint(str(checkpoint_path))
         return finish_response['id']
@@ -1360,6 +1370,8 @@ class DriveService:
             if not use_internal_gate:
                 self._mem_release(mem_need)
 
+        if self.verbose:
+            print(f"     [timing] network upload total: {time.time() - start_total:.3f}s")
         print(f"     ✅ Network upload complete (file id: {network_file_id})")
 
         # Create the Drive file entry pointing at the uploaded network file.
@@ -1378,7 +1390,10 @@ class DriveService:
         if modification_time:
             file_entry_payload['modificationTime'] = modification_time
 
+        metadata_started = time.perf_counter()
         created_file = self.api.create_file_entry(file_entry_payload)
+        if self.verbose:
+            print(f"     [timing] files metadata create: {time.perf_counter() - metadata_started:.3f}s")
         print(f"     ✅ File entry created (UUID: {created_file.get('uuid', 'N/A')})")
 
         with self.cache_lock:
