@@ -648,8 +648,8 @@ def move_path(paths: Tuple[str, ...], workers: int, on_conflict: str,
 @click.option('--exclude', multiple=True, help='Exclude files matching pattern (e.g., --exclude "*.tmp" --exclude ".DS_Store")')
 @click.option('--workers', '-w', type=int, default=4, show_default=True,
               help='Parallel upload workers for batch directory uploads (1 = serial)')
-@click.option('--chunk-workers', type=int, default=4, show_default=True,
-              help='Parallel multipart part PUTs within a single large file (1 = serial)')
+@click.option('--chunk-workers', type=int, default=1, show_default=True,
+              help='Parallel multipart part PUTs within a single large file (1 = serial; use 4+ for concurrency testing)')
 @click.option('--resume/--no-resume', 'resume', default=True, show_default=True,
               help='Resume interrupted multipart uploads (>= 100 MiB) from their checkpoint '
                    'instead of restarting from scratch')
@@ -1294,8 +1294,8 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
 @click.option('--on-conflict', type=click.Choice(['overwrite', 'skip'], case_sensitive=False),
               default='overwrite', show_default=True,
               help='Action if the target file already exists')
-@click.option('--chunk-workers', type=int, default=4, show_default=True,
-              help='Parallel multipart part PUTs within the file (1 = serial)')
+@click.option('--chunk-workers', type=int, default=1, show_default=True,
+              help='Parallel multipart part PUTs within the file (1 = serial; default: 1)')
 @click.option('--temp-dir', type=click.Path(file_okay=False), default=None,
               help='Directory for the temporary spool file (default: system temp / $TMPDIR). '
                    'The whole stream is buffered here before upload — ensure enough free space.')

@@ -79,11 +79,12 @@ class DriveService:
         self.UPLOAD_PART_SIZE = 30 * 1024 * 1024          # 30MB parts
         self.MAX_MULTIPARTS = 10000                       # server part-count ceiling
         # Within-file concurrency: how many multipart part PUTs may be in
-        # flight at once for a SINGLE large file. The CTR keystream + content
-        # hash stay strictly sequential in the producer; only the network PUTs
-        # run in parallel. Bytes in flight are additionally bounded by the
-        # memory gate (_mem_acquire). Overridable per-run (cli --chunk-workers).
-        self.chunk_workers = 4
+        # flight at once for a SINGLE large file. The safe default is serial;
+        # concurrent PUTs remain available for explicit testing/tuning with
+        # --chunk-workers. The CTR keystream + content hash stay strictly
+        # sequential in the producer, and bytes in flight are additionally
+        # bounded by the memory gate (_mem_acquire).
+        self.chunk_workers = 1
 
         # --- Resumable multipart uploads (issue #11) ---
         # The network API cannot recover an interrupted upload (files/start
