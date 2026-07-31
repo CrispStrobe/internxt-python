@@ -2034,6 +2034,23 @@ def find(path: str, name_pattern: Optional[str], iname_pattern: Optional[str], m
 
 @cli.command()
 @click.argument('path')
+@click.argument('new_name')
+def rename(path: str, new_name: str):
+    """Rename a file or folder at PATH to NEW_NAME."""
+    try:
+        auth_service.get_auth_details()
+        resolved = drive_service.resolve_path(path)
+        drive_service.rename_item(resolved['uuid'], new_name)
+        click.echo(f"✅ Renamed {path} to {new_name}")
+    except FileNotFoundError:
+        click.echo(f"❌ Path not found: {path}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"❌ Rename failed: {e}", err=True)
+        sys.exit(1)
+
+@cli.command()
+@click.argument('path')
 @click.option('--json', 'json_out', is_flag=True,
               help='Emit machine-readable JSON ({type, uuid, path, metadata}). '
                    'Suitable for programmatic consumption.')
