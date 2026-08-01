@@ -392,6 +392,30 @@ def mkdir(path: str, parent_folder_id: Optional[str]):
 
 # cli.py
 
+@cli.command('cp')
+@click.argument('source')
+@click.argument('target')
+def copy_path(source: str, target: str):
+    """Copy a file or folder into TARGET, preserving its remote metadata."""
+    try:
+        auth_service.get_auth_details()
+        source_info = drive_service.resolve_path(source)
+        target_info = drive_service.resolve_path(target)
+        if target_info['type'] != 'folder':
+            raise click.ClickException(f"Target '{target}' is a file, not a folder.")
+        if source_info['type'] == 'file':
+            result = drive_service.copy_item(source_info['uuid'], target_info['uuid'])
+        elif source_info['type'] == 'folder':
+            result = drive_service.copy_folder(source_info['uuid'], target_info['uuid'])
+        else:
+            raise click.ClickException(f"Unsupported source type: {source_info['type']}")
+        click.echo(f"✅ Copied {source} → {target}")
+        return result
+    except click.ClickException:
+        raise
+    except Exception as e:
+        raise click.ClickException(f"Copy failed: {e}") from e
+
 @cli.command('mv')
 @click.argument('paths', nargs=-1, required=True)
 @click.option('--workers', '-w', type=int, default=4, show_default=True,
