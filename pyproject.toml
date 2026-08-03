@@ -4,14 +4,6 @@ addopts = [
     "-q",
     "--strict-markers",
 ]
-markers = [
-    # Supplied by pytest-rerunfailures, which is an optional dev dependency.
-    # Registered here so --strict-markers does not abort collection of the
-    # whole live suite when the plugin is absent (tests/test_live_smoke.py
-    # applies it at module level). With the plugin installed the mark works
-    # as normal; without it, it is simply inert.
-    "flaky: retry a transient live test (needs pytest-rerunfailures)",
-]
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
