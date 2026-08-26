@@ -3,6 +3,12 @@
 ## Unreleased
 
 ### Added
+- **Upload target path aliases and recovery-friendly scans.** `upload` now
+  accepts `--target` / `--path` / `-t` for the remote destination, still
+  tolerates the old positional target shorthand, and normalizes Windows
+  backslash paths. Recursive uploads also persist their remote subtree scan for
+  24 hours so interrupted reruns can skip pre-existing files without fetching
+  the full tree again.
 - **Resumable multipart uploads** (internxt-python issue #11). No official
   Internxt client can recover an interrupted upload — the network API's
   `files/start` always mints a new uuid/UploadId and there is no endpoint to
@@ -57,6 +63,12 @@
   `--temp-dir` relocates the spool.
 
 ### Fixed
+- **Large recursive uploads are more tolerant of flaky disks and gateway
+  errors.** Local file reads are retried in bounded subreads with exact offset
+  reporting, transient gateway/API failures (`429`, `502`, `503`, `504`) are
+  retried around upload metadata and listing calls, and an ambiguous
+  post-create `502` now checks the destination before retrying to avoid obvious
+  duplicate metadata entries.
 - **Clearer API errors**: a failed request now reports the HTTP status, reads the
   server's message under either `message` or `error` (the network gateway uses
   `error`), and adds an actionable hint for well-known conditions. A full account

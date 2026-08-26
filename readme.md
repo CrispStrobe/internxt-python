@@ -53,7 +53,7 @@ python cli.py webdav-start
 python cli.py list-path
 python cli.py search "report"
 python cli.py find /Documents "*.pdf"
-python cli.py upload -r -p ./my-docs /Backups
+python cli.py upload ./my-docs --target /Backups
 ```
 
 ## 📖 Usage Guide
@@ -194,13 +194,19 @@ python cli.py find . "report*"            # Files starting with "report" in curr
 
 ```bash
 # Upload a single file, preserving its timestamp
-python cli.py upload -p ./local-report.pdf /Documents/
+python cli.py upload ./local-report.pdf --target /Documents --preserve-timestamps
 
 # Upload a whole folder recursively, preserving all timestamps
-python cli.py upload -r -p ./my-project /Backups/
+python cli.py upload ./my-project --target /Backups --preserve-timestamps
 
 # Upload with filters and overwrite conflicts
-python cli.py upload -r ./photos /Photos --include "*.jpg" --on-conflict overwrite
+python cli.py upload ./photos --target /Photos --include "*.jpg" --on-conflict overwrite
+
+# Legacy shorthand is also accepted: final remote-looking argument becomes the target
+python cli.py upload ./photos /Photos
+
+# Windows: use forward slashes for Internxt paths; quote local paths with spaces
+python cli.py upload "D:/alle fotos" --target "/Katharina" --on-conflict skip
 ```
 
 **Stream from stdin (`rcat`)**

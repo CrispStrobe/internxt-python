@@ -106,6 +106,8 @@ class DriveService:
         # are separated by a flat delay so brief outages can pass.
         self.UPLOAD_REPAIR_ROUNDS = 2
         self.UPLOAD_REPAIR_DELAY = 15                     # seconds between repair rounds
+        self.LOCAL_READ_CHUNK_SIZE = 8 * 1024 * 1024       # smaller reads avoid some device/driver edge cases
+        self.LOCAL_READ_RETRIES = 3
 
         # Step B — parallel ranged downloads (opt-in, riskier). When enabled and
         # the file is large enough, a single presigned S3 GET is split into N
@@ -249,6 +251,74 @@ class DriveService:
                       f"(attempt {attempt + 1}/{max_retries}): {last_err}; retrying in {wait}s...")
                 time.sleep(wait)
         raise Exception(f"Part {part_no}/{total_parts} failed after {max_retries} attempts: {last_err}")
+
+    def _read_upload_chunk(self, f, file_path: Path, offset: int,
+                           size: int, file_size: int) -> bytes:
+        """Read an upload part with small local reads and retry diagnostics."""
+        data = bytearray()
+        while len(data) < size:
+            absolute_offset = offset + len(data)
+            read_size = min(self.LOCAL_READ_CHUNK_SIZE, size - len(data))
+            last_err: Optional[OSError] = None
+            piece = b''
+            for attempt in range(self.LOCAL_READ_RETRIES):
+                try:
+                    f.seek(absolute_offset)
+                    piece = f.read(read_size)
+                    break
+                except OSError as e:
+                    last_err = e
+                    if attempt < self.LOCAL_READ_RETRIES - 1:
+                        wait = 2 ** attempt
+                        print(f"\n        ⚠️  Local read failed for {file_path} "
+                              f"at offset {absolute_offset}/{file_size} "
+                              f"(attempt {attempt + 1}/{self.LOCAL_READ_RETRIES}): "
+                              f"{e}; retrying in {wait}s...")
+                        time.sleep(wait)
+            else:
+                raise IOError(
+                    f"Local read failed for {file_path} at offset "
+                    f"{absolute_offset}/{file_size}: {last_err}"
+                )
+            if not piece:
+                raise IOError(
+                    f"Unexpected EOF reading {file_path} at offset "
+                    f"{absolute_offset}/{file_size}"
+                )
+            data.extend(piece)
+        return bytes(data)
+
+    @staticmethod
+    def _is_transient_api_error(exc: BaseException) -> bool:
+        msg = str(exc).lower()
+        return (
+            isinstance(exc, ConnectionError)
+            or 'http 429' in msg
+            or 'http 502' in msg
+            or 'http 503' in msg
+            or 'http 504' in msg
+            or 'bad gateway' in msg
+            or 'gateway timeout' in msg
+            or 'temporarily unavailable' in msg
+        )
+
+    def _call_api_with_retry(self, call, label: str, max_retries: int = 4):
+        """Retry transient Internxt API failures around non-S3 upload steps."""
+        last_err: Optional[BaseException] = None
+        for attempt in range(max_retries):
+            try:
+                return call()
+            except Exception as e:
+                if not self._is_transient_api_error(e):
+                    raise
+                last_err = e
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    print(f"        ⚠️  {label} failed "
+                          f"(attempt {attempt + 1}/{max_retries}): {e}; "
+                          f"retrying in {wait}s...")
+                    time.sleep(wait)
+        raise Exception(f"{label} failed after {max_retries} attempts: {last_err}")
 
     # ---------- resumable-upload checkpoints ----------
 
@@ -425,8 +495,10 @@ class DriveService:
                 print(f"        Multipart upload: {parts} part(s) of "
                       f"{self._format_size(part_size)}")
             stage_started = time.perf_counter()
-            start_response = self.api.start_upload(bucket_id, file_size,
-                                                   auth=network_auth, parts=parts)
+            start_response = self._call_api_with_retry(
+                lambda: self.api.start_upload(
+                    bucket_id, file_size, auth=network_auth, parts=parts),
+                'files/start')
             if self.verbose:
                 print(f"        [timing] files/start: {time.perf_counter() - stage_started:.3f}s")
             upload_details = start_response['uploads'][0]
@@ -535,9 +607,8 @@ class DriveService:
                             dispatch = False
                     remaining = file_size - bytes_done
                     read_size = remaining if not use_multipart else min(part_size, remaining)
-                    plaintext = f.read(read_size)
-                    if not plaintext and remaining > 0:
-                        raise IOError(f"Unexpected EOF reading {file_path} at offset {bytes_done}")
+                    plaintext = self._read_upload_chunk(
+                        f, file_path, bytes_done, read_size, file_size)
                     ciphertext = encryptor.update(plaintext)
                     sha.update(ciphertext)
                     bytes_done += len(plaintext)
@@ -608,8 +679,10 @@ class DriveService:
         finish_payload = {'index': file_index_hex, 'shards': [shard]}
         finish_started = time.perf_counter()
         try:
-            finish_response = self.api.finish_upload(bucket_id, finish_payload,
-                                                     auth=network_auth)
+            finish_response = self._call_api_with_retry(
+                lambda: self.api.finish_upload(bucket_id, finish_payload,
+                                               auth=network_auth),
+                'files/finish')
         except ValueError as e:
             # _make_request maps HTTP-status errors to ValueError. On a resumed
             # upload that means the server no longer accepts the old state
@@ -647,8 +720,9 @@ class DriveService:
                 offset = idx * part_size
                 try:
                     with open(file_path, 'rb') as f:
-                        f.seek(offset)
-                        plaintext = f.read(min(part_size, file_size - offset))
+                        plaintext = self._read_upload_chunk(
+                            f, file_path, offset,
+                            min(part_size, file_size - offset), file_size)
                     enc = self.crypto.new_upload_encryptor_at(
                         mnemonic, bucket_id, file_index_hex, offset)
                     ciphertext = enc.update(plaintext) + enc.finalize()
@@ -1306,6 +1380,56 @@ class DriveService:
         
         return filename
 
+    def _find_file_entry_in_folder(self, destination_folder_uuid: str,
+                                   payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Best-effort check for an entry created before an ambiguous 502."""
+        with self.cache_lock:
+            self.folder_content_cache.pop(destination_folder_uuid, None)
+        content = self.get_folder_content(destination_folder_uuid)
+        target_name = payload.get('plainName') or ''
+        target_type = payload.get('type') or ''
+        try:
+            target_size = int(payload.get('size', 0))
+        except (TypeError, ValueError):
+            target_size = 0
+        for item in content.get('files', []):
+            try:
+                item_size = int(item.get('size', 0))
+            except (TypeError, ValueError):
+                item_size = -1
+            if (
+                (item.get('plainName') or '') == target_name
+                and (item.get('type') or '') == target_type
+                and item_size == target_size
+            ):
+                return item
+        return None
+
+    def _create_file_entry_with_retry(self, payload: Dict[str, Any],
+                                      destination_folder_uuid: str,
+                                      max_retries: int = 4) -> Dict[str, Any]:
+        last_err: Optional[BaseException] = None
+        for attempt in range(max_retries):
+            try:
+                return self.api.create_file_entry(payload)
+            except Exception as e:
+                if not self._is_transient_api_error(e):
+                    raise
+                last_err = e
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    print(f"     ⚠️  files metadata create failed "
+                          f"(attempt {attempt + 1}/{max_retries}): {e}; "
+                          f"checking destination and retrying in {wait}s...")
+                    time.sleep(wait)
+                    existing = self._find_file_entry_in_folder(
+                        destination_folder_uuid, payload)
+                    if existing is not None:
+                        print("     ✅ File entry already exists after transient error")
+                        return existing
+        raise Exception(
+            f"files metadata create failed after {max_retries} attempts: {last_err}")
+
     def upload_file_to_folder(self, file_path_str: str, destination_folder_uuid: str,
                             custom_name: Optional[str] = None, custom_extension: Optional[str] = None,
                             creation_time: Optional[str] = None, modification_time: Optional[str] = None):
@@ -1393,7 +1517,8 @@ class DriveService:
             file_entry_payload['modificationTime'] = modification_time
 
         metadata_started = time.perf_counter()
-        created_file = self.api.create_file_entry(file_entry_payload)
+        created_file = self._create_file_entry_with_retry(
+            file_entry_payload, destination_folder_uuid)
         if self.verbose:
             print(f"     [timing] files metadata create: {time.perf_counter() - metadata_started:.3f}s")
         print(f"     ✅ File entry created (UUID: {created_file.get('uuid', 'N/A')})")
@@ -1546,7 +1671,9 @@ class DriveService:
         """Recursively get all folders with pagination"""
         try:
             limit = 50 
-            response = self.api.get_folder_folders(folder_uuid, offset, limit) 
+            response = self._call_api_with_retry(
+                lambda: self.api.get_folder_folders(folder_uuid, offset, limit),
+                f'folders/content/{folder_uuid}/folders?offset={offset}')
             folders = response.get('result', response.get('folders', []))
 
             if len(folders) == limit: 
@@ -1561,7 +1688,9 @@ class DriveService:
         """Recursively get all files with pagination"""
         try:
             limit = 50
-            response = self.api.get_folder_files(folder_uuid, offset, limit) 
+            response = self._call_api_with_retry(
+                lambda: self.api.get_folder_files(folder_uuid, offset, limit),
+                f'folders/content/{folder_uuid}/files?offset={offset}')
             files = response.get('result', response.get('files', []))
 
             if len(files) == limit: 

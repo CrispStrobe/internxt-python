@@ -6,6 +6,37 @@ retrospective lessons see [`LEARNINGS.md`](LEARNINGS.md).
 
 ---
 
+## Recursive upload hardening and live SSD recovery (2026-08-26)
+
+Fixed the practical failure mode from uploading `D:\alle fotos` into
+`/Katharina`: the upload command now has explicit remote destination aliases
+(`--target`, `--path`, `-t`), normalizes Windows backslash paths, and keeps
+compatibility with the old positional target shorthand. The previous `-p`
+confusion came from `-p` meaning `--preserve-timestamps`, not "path".
+
+Recursive uploads now persist the remote subtree pre-scan under the user's
+Internxt CLI cache for 24 hours. That means an interrupted rerun can reuse the
+known remote folder/file map and skip already-present files without rescanning
+tens of thousands of entries. Upload logging also reconfigures stdio to UTF-8
+when possible so redirected Windows logs do not fail on status symbols.
+
+Hardened large uploads around the failures seen in the live run:
+
+- Local file reads use bounded 8 MiB subreads with retries and exact offset
+  reporting, reducing failures from an unclean external disk.
+- Transient API/gateway errors (`429`, `502`, `503`, `504`) are retried for
+  upload start/finish, remote listing, and metadata creation.
+- If file metadata creation returns an ambiguous `502`, the CLI checks the
+  destination folder for the file before retrying, avoiding obvious duplicate
+  entries after a server-side success with a lost response.
+
+Verified live against the real account: the main recursive upload completed
+with **58 uploaded, 59,587 skipped, 1 filtered, 0 errors** while excluding the
+problematic large video. A targeted rerun then resumed the video multipart
+upload at **161/266 parts** and completed it successfully.
+
+---
+
 ## Large-file uploads: streaming + true multipart + streaming download (2026-06-29)
 
 Addresses [issue #5](https://github.com/CrispStrobe/internxt-python/issues/5)

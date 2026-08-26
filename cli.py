@@ -7,6 +7,8 @@ Enhanced with path-based operations and comprehensive delete/trash functionality
 import click
 import sys
 import os
+import json
+import hashlib
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
@@ -17,6 +19,13 @@ import tempfile
 import concurrent.futures
 # Used for controlled webdav-start spawn (argv list, no shell, no untrusted input).
 import subprocess  # nosec B404
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 # Try to import required packages (probe imports up-front so we can give a
 # friendly install hint instead of a deep stack trace from a service module).
@@ -93,6 +102,29 @@ def format_size(size_bytes: int) -> str:
             return f"{size:.1f} {unit}"
         size /= 1024.0
     return f"{size:.1f} PB"
+
+
+def _looks_like_remote_path_arg(value: str) -> bool:
+    """Best-effort detection for legacy upload SOURCE REMOTE_PATH usage."""
+    stripped = value.strip()
+    if not stripped:
+        return False
+    normalized = stripped.replace('\\', '/')
+    if normalized.startswith('/'):
+        return True
+    # Avoid treating Windows drive paths like D:/Photos as remote paths.
+    if len(normalized) >= 3 and normalized[1] == ':' and normalized[2] == '/':
+        return False
+    return False
+
+
+def _normalize_remote_path_arg(value: str) -> str:
+    normalized = value.strip().replace('\\', '/')
+    if not normalized.startswith('/'):
+        normalized = '/' + normalized
+    while '//' in normalized:
+        normalized = normalized.replace('//', '/')
+    return normalized.rstrip('/') or '/'
 
 
 def format_date(date_string: str) -> str:
@@ -664,7 +696,8 @@ def move_path(paths: Tuple[str, ...], workers: int, on_conflict: str,
 
 @cli.command()
 @click.argument('sources', nargs=-1, type=str)
-@click.option('--target', '-t', 'target_path', default='/', help='Destination path on Internxt Drive (default: /)')
+@click.option('--target', '--path', '-t', 'target_path', default='/',
+              help='Destination path on Internxt Drive (default: /)')
 @click.option('--recursive', '-r', is_flag=True, help='Upload directories recursively')
 @click.option('--on-conflict', type=click.Choice(['overwrite', 'skip'], case_sensitive=False), default='skip', help='Action if target exists (overwrite/skip)')
 @click.option('--preserve-timestamps', '-p', is_flag=True, help='Preserve file creation and modification times')
@@ -688,8 +721,8 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
     TARGET_PATH is the destination path on your Internxt Drive (e.g., "/Documents/Backup").
     
     Trailing slash behavior (like rsync):
-      source/  → uploads contents to target (no new folder)
-      source   → creates 'source' folder in target
+      source/  -> uploads contents to target (no new folder)
+      source   -> creates 'source' folder in target
     
     Use --preserve-timestamps to maintain original file dates (experimental).
     Use --include/--exclude to filter files by pattern (supports wildcards).
@@ -705,6 +738,21 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
         python cli.py upload docs/ -t /Documents -r --preserve-timestamps
     """
     if not sources:
+        click.echo("❌ No source files or directories specified.", err=True)
+        sys.exit(1)
+
+    sources_list = list(sources)
+    if target_path == '/' and len(sources_list) >= 2:
+        possible_target = sources_list[-1]
+        possible_target_path = Path(possible_target)
+        if _looks_like_remote_path_arg(possible_target) and not possible_target_path.exists():
+            target_path = _normalize_remote_path_arg(possible_target)
+            sources_list = sources_list[:-1]
+            click.echo(f"ℹ️  Treating final argument as remote target path: {target_path}")
+
+    target_path = _normalize_remote_path_arg(target_path)
+
+    if not sources_list:
         click.echo("❌ No source files or directories specified.", err=True)
         sys.exit(1)
 
@@ -763,7 +811,7 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
         # --- Process Sources ---
         items_to_process = []
         click.echo("🔍 Expanding source paths...")
-        for source_arg in sources:
+        for source_arg in sources_list:
             has_trailing_slash = source_arg.rstrip().endswith('/') or source_arg.rstrip().endswith(os.sep)
             source_path = Path(source_arg)
             
@@ -910,10 +958,78 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                     counters_lock = threading.Lock()
                     # parent_uuid -> {filename: {size, mtime, uuid}}
                     existing_files_by_parent: Dict[str, Dict[str, Dict[str, Any]]] = {}
+                    remote_scan_content_by_folder: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+                    remote_scan_cache_loaded = False
+                    remote_scan_cache_ttl = 24 * 3600
 
                     def _safe_log(msg: str, err: bool = False) -> None:
                         with log_lock:
                             click.echo(msg, err=err)
+
+                    def _remote_scan_cache_path(root_uuid: str) -> Path:
+                        cache_key = hashlib.sha256(
+                            f"{root_uuid}|{dir_base_str}".encode('utf-8')
+                        ).hexdigest()[:32]
+                        return (
+                            drive_service.config.internxt_cli_data_dir
+                            / 'remote_scan_cache'
+                            / f"{cache_key}.json"
+                        )
+
+                    def _load_remote_scan_cache(root_uuid: str) -> bool:
+                        nonlocal remote_scan_cache_loaded
+                        cp = _remote_scan_cache_path(root_uuid)
+                        try:
+                            with open(cp, 'r', encoding='utf-8') as f:
+                                data = json.load(f)
+                            if data.get('version') != 1:
+                                return False
+                            if data.get('root_uuid') != root_uuid or data.get('root_path') != dir_base_str:
+                                return False
+                            created = float(data.get('created') or 0)
+                            if (time.time() - created) > remote_scan_cache_ttl:
+                                return False
+                            content_by_folder = data.get('content_by_folder') or {}
+                            if not isinstance(content_by_folder, dict):
+                                return False
+                            with cache_lock, drive_service.cache_lock:
+                                for folder_uuid, content in content_by_folder.items():
+                                    folders = content.get('folders') or []
+                                    files = content.get('files') or []
+                                    if not isinstance(folders, list) or not isinstance(files, list):
+                                        return False
+                                    normalized = {'folders': folders, 'files': files}
+                                    remote_scan_content_by_folder[folder_uuid] = normalized
+                                    existing_files_by_parent[folder_uuid] = dict(
+                                        _file_meta_from_api(api_file) for api_file in files
+                                    )
+                                    drive_service.folder_content_cache[folder_uuid] = (
+                                        time.time(), normalized)
+                            remote_scan_cache_loaded = True
+                            return True
+                        except Exception as cache_err:
+                            if verbose:
+                                _safe_log(f"  -> ⚠️  Could not load remote scan cache: {cache_err}")
+                            return False
+
+                    def _save_remote_scan_cache(root_uuid: str) -> None:
+                        cp = _remote_scan_cache_path(root_uuid)
+                        try:
+                            cp.parent.mkdir(parents=True, exist_ok=True)
+                            payload = {
+                                'version': 1,
+                                'created': time.time(),
+                                'root_uuid': root_uuid,
+                                'root_path': dir_base_str,
+                                'content_by_folder': remote_scan_content_by_folder,
+                            }
+                            tmp = cp.with_suffix('.tmp')
+                            with open(tmp, 'w', encoding='utf-8') as f:
+                                json.dump(payload, f, ensure_ascii=False)
+                            os.replace(tmp, cp)
+                        except Exception as cache_err:
+                            if verbose:
+                                _safe_log(f"  -> ⚠️  Could not save remote scan cache: {cache_err}")
 
                     def _bump_counter(kind: str) -> None:
                         nonlocal success_count, skipped_count, error_count, filtered_count
@@ -944,6 +1060,8 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                         meta_map: Dict[str, Dict[str, Any]] = {}
                         try:
                             content = drive_service.get_folder_content(parent_uuid)
+                            with cache_lock:
+                                remote_scan_content_by_folder[parent_uuid] = content
                             for api_file in content.get('files', []):
                                 name, meta = _file_meta_from_api(api_file)
                                 meta_map[name] = meta
@@ -1035,13 +1153,22 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                             click.echo(f"  -> ⚠️  Could not check target subtree: {e}")
 
                     if existing_root_info is not None:
-                        click.echo("  -> ✨ Target subtree exists; pre-scanning recursively to skip Pass 1...")
-                        _seed_recursive(existing_root_info['uuid'])
-                        _scan_tick(force=True)
-                        click.echo("")  # finish the in-place line
+                        if _load_remote_scan_cache(existing_root_info['uuid']):
+                            total_files = sum(len(v) for v in existing_files_by_parent.values())
+                            click.echo(
+                                f"  -> 📋 Reused remote scan cache: "
+                                f"{len(existing_files_by_parent):,} folders, "
+                                f"{total_files:,} files")
+                        else:
+                            click.echo("  -> ✨ Target subtree exists; pre-scanning recursively to skip Pass 1...")
+                            _seed_recursive(existing_root_info['uuid'])
+                            _scan_tick(force=True)
+                            click.echo("")  # finish the in-place line
+                            _save_remote_scan_cache(existing_root_info['uuid'])
                         pass1_skipped = True
                         total_files = sum(len(v) for v in existing_files_by_parent.values())
-                        click.echo(f"  -> 📋 Pre-scanned {len(existing_files_by_parent):,} folders, {total_files:,} files")
+                        if not remote_scan_cache_loaded:
+                            click.echo(f"  -> 📋 Pre-scanned {len(existing_files_by_parent):,} folders, {total_files:,} files")
                     elif not copy_contents_only:
                         # Need to create root folder with timestamps
                         ct_root, mt_root = _read_timestamps(local_path)

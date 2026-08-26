@@ -11,6 +11,7 @@ internxt_python_cli.egg-info/
 .ruff_cache/
 htmlcov/
 coverage.xml
+upload-*.log
 
 # Virtualenvs
 venv/

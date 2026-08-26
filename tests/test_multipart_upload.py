@@ -153,6 +153,75 @@ def test_large_file_uses_multipart():
     assert cap['chunk_calls'] == 0  # multipart never uses the single-PUT path
 
 
+def test_local_upload_read_retries_transient_oserror():
+    payload = b'abcdef'
+
+    class FlakyReader:
+        def __init__(self):
+            self.pos = 0
+            self.failed_once = False
+
+        def seek(self, pos):
+            self.pos = pos
+
+        def read(self, size):
+            if not self.failed_once:
+                self.failed_once = True
+                raise OSError(22, 'Invalid argument')
+            start = self.pos
+            end = min(start + size, len(payload))
+            self.pos = end
+            return payload[start:end]
+
+    saved_read_size = drive_service.LOCAL_READ_CHUNK_SIZE
+    saved_retries = drive_service.LOCAL_READ_RETRIES
+    try:
+        drive_service.LOCAL_READ_CHUNK_SIZE = 3
+        drive_service.LOCAL_READ_RETRIES = 2
+        assert drive_service._read_upload_chunk(
+            FlakyReader(), Path('video.mp4'), 0, len(payload), len(payload)
+        ) == payload
+    finally:
+        drive_service.LOCAL_READ_CHUNK_SIZE = saved_read_size
+        drive_service.LOCAL_READ_RETRIES = saved_retries
+
+
+def test_api_retry_handles_transient_gateway_error():
+    calls = {'count': 0}
+
+    def flaky_call():
+        calls['count'] += 1
+        if calls['count'] == 1:
+            raise ValueError('API Error (HTTP 502): Bad gateway')
+        return {'ok': True}
+
+    with patch('services.drive.time.sleep'):
+        assert drive_service._call_api_with_retry(flaky_call, 'files/finish') == {'ok': True}
+    assert calls['count'] == 2
+
+
+def test_create_file_entry_reuses_entry_created_before_502():
+    payload = {
+        'plainName': 'video',
+        'type': 'mp4',
+        'size': 123,
+    }
+    existing = {
+        'uuid': 'file-uuid',
+        'plainName': 'video',
+        'type': 'mp4',
+        'size': '123',
+    }
+
+    with patch.object(drive_service.api, 'create_file_entry',
+                      side_effect=ValueError('API Error (HTTP 502): Bad gateway')), \
+         patch.object(drive_service, 'get_folder_content',
+                      return_value={'files': [existing], 'folders': []}), \
+         patch('services.drive.time.sleep'):
+        assert drive_service._create_file_entry_with_retry(
+            payload, 'folder-uuid') == existing
+
+
 def test_multipart_finish_payload_shape():
     cap = _run_upload(250_000, part_size=100_000, multipart_min=50_000)
     shard = cap['finish']['shards'][0]

@@ -236,6 +236,57 @@ def test_upload_rejects_when_target_path_is_file(runner):
     assert 'not a folder' in result.output
 
 
+def test_upload_accepts_path_alias_for_target(runner, tmp_path):
+    local_file = tmp_path / 'doc.txt'
+    local_file.write_text('hello', encoding='utf-8')
+    target_info = {'type': 'folder', 'uuid': 'target-uuid', 'path': '/Docs'}
+    with patch('cli.auth_service.refresh_tokens'), \
+         patch('cli.auth_service.get_auth_details', return_value={}), \
+         patch('cli.drive_service.resolve_path', return_value=target_info) as mock_resolve, \
+         patch('cli.drive_service.upload_single_item_with_conflict_handling',
+               return_value='uploaded') as mock_upload:
+        result = runner.invoke(cli, ['upload', str(local_file), '--path', '/Docs'])
+    assert result.exit_code == 0, result.output
+    mock_resolve.assert_any_call('/Docs')
+    mock_upload.assert_called_once()
+
+
+def test_upload_accepts_legacy_positional_remote_target(runner, tmp_path):
+    local_file = tmp_path / 'doc.txt'
+    local_file.write_text('hello', encoding='utf-8')
+    target_info = {'type': 'folder', 'uuid': 'target-uuid', 'path': '/Katharina'}
+    with patch('cli.auth_service.refresh_tokens'), \
+         patch('cli.auth_service.get_auth_details', return_value={}), \
+         patch('cli.drive_service.resolve_path', return_value=target_info) as mock_resolve, \
+         patch('cli.drive_service.upload_single_item_with_conflict_handling',
+               return_value='uploaded') as mock_upload:
+        result = runner.invoke(cli, ['upload', str(local_file), '\\Katharina\\'])
+    assert result.exit_code == 0, result.output
+    assert 'Treating final argument as remote target path: /Katharina' in result.output
+    mock_resolve.assert_any_call('/Katharina')
+    mock_upload.assert_called_once()
+
+
+def test_upload_infers_remote_target_even_with_preserve_timestamps_flag(runner, tmp_path):
+    local_file = tmp_path / 'doc.txt'
+    local_file.write_text('hello', encoding='utf-8')
+    target_info = {'type': 'folder', 'uuid': 'target-uuid', 'path': '/Katharina'}
+    with patch('cli.auth_service.refresh_tokens'), \
+         patch('cli.auth_service.get_auth_details', return_value={}), \
+         patch('cli.drive_service.resolve_path', return_value=target_info) as mock_resolve, \
+         patch('cli.drive_service.upload_single_item_with_conflict_handling',
+               return_value='uploaded') as mock_upload:
+        result = runner.invoke(
+            cli,
+            ['upload', str(local_file), '-p', '\\Katharina\\'],
+        )
+    assert result.exit_code == 0, result.output
+    assert 'Treating final argument as remote target path: /Katharina' in result.output
+    mock_resolve.assert_any_call('/Katharina')
+    _, kwargs = mock_upload.call_args
+    assert kwargs['modification_time'] is not None
+
+
 # ---------- download-path ----------
 
 def test_download_path_folder_without_recursive_errors(runner):
