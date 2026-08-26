@@ -2059,6 +2059,15 @@ class DriveService:
         if creation_time or modification_time:
             print("  -> 🕐 With timestamp preservation")
 
+        file_stem = Path(effective_remote_filename).stem
+        file_suffix = Path(effective_remote_filename).suffix.lstrip('.')
+
+        if not file_suffix and '.' not in effective_remote_filename:
+            file_suffix = ''
+        elif not file_suffix and '.' in effective_remote_filename:
+            file_stem = effective_remote_filename
+            file_suffix = ''
+
         existing_item_info = None
         try:
             existing_item_info = self.resolve_path(full_target_remote_path)
@@ -2088,18 +2097,25 @@ class DriveService:
             else:
                 print(f"  -> ❌ Invalid conflict mode '{on_conflict}'")
                 return "error"
+        elif on_conflict == 'skip':
+            # The path cache can be stale or miss files after a large cached
+            # pre-scan. Before spending bandwidth on a "missing" file, force a
+            # parent listing and check the exact Drive entry by name/type/size.
+            existing_file = self._find_file_entry_in_folder(
+                target_folder_uuid,
+                {
+                    'plainName': file_stem,
+                    'type': file_suffix if file_suffix else '',
+                    'size': file_size,
+                },
+            )
+            if existing_file is not None:
+                print("  -> ⏭️  Skipping due to conflict policy "
+                      "(file exists after parent refresh)")
+                return "skipped"
 
         # --- Proceed with upload ---
         try:
-            file_stem = Path(effective_remote_filename).stem
-            file_suffix = Path(effective_remote_filename).suffix.lstrip('.')
-            
-            if not file_suffix and '.' not in effective_remote_filename:
-                file_suffix = ''
-            elif not file_suffix and '.' in effective_remote_filename:
-                file_stem = effective_remote_filename
-                file_suffix = ''
-
             # Upload with timestamps
             self.upload_file_to_folder(
                 str(local_path),
@@ -2112,6 +2128,10 @@ class DriveService:
             print(f"  -> ✅ Successfully uploaded: {effective_remote_filename}")
             return "uploaded"
         except Exception as up_err:
+            if on_conflict == 'skip' and "File already exists" in str(up_err):
+                print("  -> ⏭️  Skipping due to conflict policy "
+                      "(server reported file already exists)")
+                return "skipped"
             print(f"  -> ❌ Error during upload: {up_err}")
             import traceback
             traceback.print_exc()
