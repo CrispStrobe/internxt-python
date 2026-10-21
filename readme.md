@@ -90,6 +90,12 @@ INTERNXT_EMAIL=you@example.com INTERNXT_PASSWORD="$MY_PASSWORD" python cli.py lo
 
 For 2FA in automation, pass the TOTP secret instead of a one-off code:
 `--tfa-secret` (or `INTERNXT_TFA_SECRET`) auto-generates the 6-digit code.
+Add `--save-tfa-secret` once to keep the secret in the keychain; later logins
+and implicit auto-login then generate codes from it without the flag or env var:
+
+```bash
+python cli.py login -e you@example.com --password-stdin --tfa-secret "$SECRET" --save-tfa-secret
+```
 
 **Implicit auto-login.** You don't strictly need to run `login` first: when no
 valid session is stored, every command (e.g. `rcat`) auto-logs-in from
@@ -114,6 +120,18 @@ The encryption key is sourced in this order:
 
 Set `INTERNXT_NO_KEYRING=1` to skip the OS keychain (forces option 2/3). Legacy
 credential files from older versions are read and upgraded automatically.
+
+**Choosing the keychain (macOS).** By default the OS default keychain (usually
+`login`) is used. To keep the CLI's secrets in a different keychain, save it once:
+
+```bash
+python cli.py config --set-keychain ~/Library/Keychains/work.keychain-db
+python cli.py config --unset-keychain     # back to the OS default
+```
+
+The choice is stored in `~/.internxt-cli/settings.json`; `INTERNXT_KEYCHAIN`
+overrides it per run. The keychain must be unlocked. After switching, log in
+again — a session saved under the old keychain can't be decrypted.
 
 ### 🌐 WebDAV Server
 

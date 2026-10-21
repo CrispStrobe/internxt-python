@@ -8,6 +8,7 @@ import os
 import json
 import sys
 import base64
+import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 
@@ -24,6 +25,62 @@ KEYRING_SERVICE = "internxt-cli"
 KEYRING_KEY = "wrapping-key"
 CRED_KEY_ENV = "INTERNXT_CREDENTIALS_KEY"
 NO_KEYRING_ENV = "INTERNXT_NO_KEYRING"
+# macOS keychain to use instead of the OS default (a keychain name such as
+# "work", or a path to a .keychain-db file). The env var overrides the value
+# saved with `config --set-keychain`.
+KEYCHAIN_ENV = "INTERNXT_KEYCHAIN"
+# Keychain account under KEYRING_SERVICE holding a user's TOTP secret.
+TFA_SECRET_ACCOUNT_PREFIX = "tfa-secret:"
+
+
+def _security_quote(value: str) -> str:
+    """Quote one argument for `security -i`, which splits on whitespace and
+    honours double quotes with backslash escapes."""
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+class MacKeychain:
+    """keyring-compatible backend bound to one specific macOS keychain.
+
+    keyring's own macOS backend ignores a chosen keychain (jaraco/keyring#623),
+    so this drives `security` directly. Secrets are written through stdin
+    (`security -i`), so they never show up in argv or the process list.
+    """
+
+    ITEM_NOT_FOUND = 44  # `security` exit status for errSecItemNotFound
+
+    def __init__(self, keychain: str):
+        self.keychain = keychain
+
+    def get_password(self, service: str, username: str) -> Optional[str]:
+        r = subprocess.run(
+            ['security', 'find-generic-password', '-s', service, '-a', username,
+             '-w', self.keychain],
+            capture_output=True, text=True)
+        if r.returncode == 0:
+            return r.stdout.rstrip('\n')
+        if r.returncode == self.ITEM_NOT_FOUND:
+            return None
+        raise RuntimeError(f"Cannot read keychain '{self.keychain}': {r.stderr.strip()}")
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        cmd = ' '.join(['add-generic-password', '-U',
+                        '-s', _security_quote(service), '-a', _security_quote(username),
+                        '-w', _security_quote(password), _security_quote(self.keychain)])
+        subprocess.run(['security', '-i'], input=cmd + '\n',
+                       capture_output=True, text=True)
+        # `security -i` exits 0 even when a command fails, so verify by reading back.
+        if self.get_password(service, username) != password:
+            raise RuntimeError(f"Cannot write to keychain '{self.keychain}' "
+                               f"(is it unlocked and in the search list?)")
+
+    def delete_password(self, service: str, username: str) -> None:
+        r = subprocess.run(
+            ['security', 'delete-generic-password', '-s', service, '-a', username,
+             self.keychain],
+            capture_output=True, text=True)
+        if r.returncode not in (0, self.ITEM_NOT_FOUND):
+            raise RuntimeError(f"Cannot delete from keychain '{self.keychain}': {r.stderr.strip()}")
 
 
 class ConfigService:
@@ -47,6 +104,7 @@ class ConfigService:
         self.internxt_cli_logs_dir = self.internxt_cli_data_dir / 'logs'
         self.internxt_tmp_dir = Path.cwd() / 'tmp'  # os.tmpdir() equivalent
         self.credentials_file = self.internxt_cli_data_dir / '.inxtcli'
+        self.settings_file = self.internxt_cli_data_dir / 'settings.json'
         self.drive_sqlite_file = self.internxt_cli_data_dir / 'internxt-cli-drive.sqlite'
         self.webdav_ssl_certs_dir = self.internxt_cli_data_dir / 'certs'
         self.webdav_configs_file = self.internxt_cli_data_dir / 'config.webdav.inxt'
@@ -129,13 +187,51 @@ class ConfigService:
                 from services.crypto import crypto_service
         return crypto_service
 
-    def _keyring(self):
-        """Return the `keyring` module if a usable OS backend is present, else None.
+    # ------------------------------------------------------------- settings
 
+    def get_setting(self, key: str) -> Optional[Any]:
+        """Read a persisted user setting (from settings.json), or None."""
+        try:
+            with open(self.settings_file, 'r', encoding='utf-8') as f:
+                return json.load(f).get(key)
+        except (OSError, ValueError):
+            return None
+
+    def set_setting(self, key: str, value: Optional[Any]) -> None:
+        """Persist a user setting; a value of None removes it."""
+        self._ensure_internxt_cli_data_dir_exists()
+        try:
+            with open(self.settings_file, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+        except (OSError, ValueError):
+            settings = {}
+        if value is None:
+            settings.pop(key, None)
+        else:
+            settings[key] = value
+        with open(self.settings_file, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=2)
+        self._restrict_file_perms(self.settings_file)
+
+    def get_keychain(self) -> Optional[str]:
+        """The macOS keychain to store secrets in: INTERNXT_KEYCHAIN, else the
+        saved `keychain` setting, else None (the OS default keychain)."""
+        return os.environ.get(KEYCHAIN_ENV) or self.get_setting('keychain')
+
+    # ------------------------------------------------------------- keychain
+
+    def _keyring(self):
+        """Return a keyring backend if one is usable, else None.
+
+        A keychain chosen via INTERNXT_KEYCHAIN / `config --set-keychain` is used
+        on macOS; otherwise the `keyring` module's OS default backend.
         Set INTERNXT_NO_KEYRING=1 to force the file fallback (headless/CI, tests).
         """
         if os.environ.get(NO_KEYRING_ENV, '').lower() in ('1', 'true', 'yes'):
             return None
+        keychain = self.get_keychain()
+        if keychain and sys.platform == 'darwin':
+            return MacKeychain(keychain)
         try:
             import keyring
             from keyring.backends.fail import Keyring as _FailKeyring
@@ -175,6 +271,24 @@ class ConfigService:
         if src == 'static':
             return self.get('APP_CRYPTO_SECRET')
         return None
+
+    def get_tfa_secret(self, email: str) -> Optional[str]:
+        """The TOTP secret saved for `email` in the keychain, or None."""
+        kr = self._keyring()
+        if kr is None:
+            return None
+        try:
+            return kr.get_password(KEYRING_SERVICE, TFA_SECRET_ACCOUNT_PREFIX + email.lower().strip())
+        except Exception:
+            return None
+
+    def save_tfa_secret(self, email: str, secret: str) -> None:
+        """Store `email`'s TOTP secret in the keychain (raises if none is usable)."""
+        kr = self._keyring()
+        if kr is None:
+            raise RuntimeError("No keychain available (INTERNXT_NO_KEYRING is set "
+                               "or no OS keychain backend is installed)")
+        kr.set_password(KEYRING_SERVICE, TFA_SECRET_ACCOUNT_PREFIX + email.lower().strip(), secret)
 
     def _restrict_file_perms(self, path: Path) -> None:
         """Best-effort chmod 600 (no-op where unsupported, e.g. Windows)."""

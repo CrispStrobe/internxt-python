@@ -130,11 +130,12 @@ class AuthService:
         _dbg(f"🔐 Auto-login as {email} (from INTERNXT_EMAIL)…")
         tfa = None
         if self.is_2fa_needed(email):
-            secret = os.environ.get('INTERNXT_TFA_SECRET')
+            secret = os.environ.get('INTERNXT_TFA_SECRET') or self.config.get_tfa_secret(email)
             if not secret:
                 raise ValueError(
                     "Auto-login requires a 2FA code: set INTERNXT_TFA_SECRET "
-                    "(your TOTP base32 secret) for unattended login.")
+                    "(your TOTP base32 secret) or save it once with "
+                    "`login --tfa-secret … --save-tfa-secret` for unattended login.")
             try:
                 import pyotp
             except ImportError:

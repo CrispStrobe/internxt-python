@@ -2026,11 +2026,13 @@ class DriveService:
             modification_time: ISO format timestamp for file modification (optional).
 
         Returns:
-            "uploaded", "skipped", or "error"
+            "uploaded", "skipped", "empty" (0-byte file, nothing to upload) or "error"
         """
         if not local_path.is_file():
-            print(f"  -> ⚠️  Not a file, skipping: {local_path}")
-            return "skipped"
+            # A path that was queued as a file but is gone or unreadable now
+            # (e.g. the source volume dropped out) is a failure, not a skip.
+            print(f"  -> ❌ Not a file (missing or unreadable): {local_path}")
+            return "error"
 
         # Validate file size before proceeding
         try:
@@ -2039,8 +2041,8 @@ class DriveService:
                 print(f"  -> ❌ File too large (>{self._format_size(self.TWENTY_GIGABYTES)}): {local_path.name}")
                 return "error"
             if file_size == 0:
-                print(f"  -> ⚠️  File is empty, skipping: {local_path.name}")
-                return "skipped"
+                print(f"  -> ⚠️  File is empty, not uploaded: {local_path.name}")
+                return "empty"
         except Exception as e:
             print(f"  -> ❌ Cannot read file: {e}")
             return "error"

@@ -63,26 +63,29 @@ def test_upload_forwards_timestamps_to_upload_call(small_file):
 
 # ---------- pre-upload validation ----------
 
-def test_directory_returns_skipped(tmp_path):
-    """Passing a directory (not a file) is a no-op skip."""
+def test_directory_returns_error(tmp_path):
+    """A path queued as a file that is not one (e.g. the source volume dropped
+    out mid-run) must fail loudly, not be counted as a harmless skip."""
     result = drive_service.upload_single_item_with_conflict_handling(
         tmp_path, '/Docs', 'parent-uuid', on_conflict='skip',
     )
-    assert result == "skipped"
+    assert result == "error"
 
 
-def test_nonexistent_path_returns_skipped(tmp_path):
+def test_nonexistent_path_returns_error(tmp_path):
     result = drive_service.upload_single_item_with_conflict_handling(
         tmp_path / "ghost.txt", '/Docs', 'parent-uuid', on_conflict='skip',
     )
-    assert result == "skipped"
+    assert result == "error"
 
 
-def test_empty_file_returns_skipped(empty_file):
+def test_empty_file_returns_empty(empty_file):
+    """0-byte files are not uploaded; they get their own outcome so callers
+    can report them instead of hiding them among skips."""
     result = drive_service.upload_single_item_with_conflict_handling(
         empty_file, '/Docs', 'parent-uuid', on_conflict='skip',
     )
-    assert result == "skipped"
+    assert result == "empty"
 
 
 def test_oversized_file_returns_error(small_file):

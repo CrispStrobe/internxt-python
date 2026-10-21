@@ -3,6 +3,15 @@
 ## Unreleased
 
 ### Added
+- **Selectable macOS keychain.** `config --set-keychain <name|path>` saves which
+  keychain holds the credential-wrapping key and 2FA secret (in
+  `~/.internxt-cli/settings.json`; `INTERNXT_KEYCHAIN` overrides it,
+  `--unset-keychain` reverts to the OS default). It goes through `security`
+  directly because `keyring`'s macOS backend ignores a chosen keychain;
+  secrets are passed on stdin, never in argv.
+- **2FA secret in the keychain.** `login --tfa-secret … --save-tfa-secret`
+  stores the TOTP secret; later logins and implicit auto-login use it when no
+  `--tfa-secret` / `INTERNXT_TFA_SECRET` is given.
 - **Upload target path aliases and recovery-friendly scans.** `upload` now
   accepts `--target` / `--path` / `-t` for the remote destination, still
   tolerates the old positional target shorthand, and normalizes Windows
@@ -61,6 +70,15 @@
   file to measure size, then runs the normal streaming-encrypt upload (single-PUT
   or multipart). Empty stdin aborts non-zero; a TTY (no pipe) is rejected;
   `--temp-dir` relocates the spool.
+
+### Changed
+- **Upload outcomes no longer hide failures as skips.** A queued file that is
+  gone or unreadable at upload time (e.g. the source volume dropped out) is now
+  an error, so the run exits non-zero. Empty files are reported separately as
+  "Empty (not uploaded)" instead of being counted as skipped.
+- **Recursive-upload pre-scan only walks remote folders that mirror a local
+  directory**, instead of the whole remote subtree, which can be far larger than
+  what is being uploaded. Unscanned folders are still listed lazily on demand.
 
 ### Fixed
 - **Large recursive uploads are more tolerant of flaky disks and gateway

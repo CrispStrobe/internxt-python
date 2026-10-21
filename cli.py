@@ -158,11 +158,15 @@ def cli():
 @click.option('--tfa-secret', envvar='INTERNXT_TFA_SECRET',
               help='TOTP secret (base32) to auto-generate 2FA codes. '
                    'Can also be set via INTERNXT_TFA_SECRET env var.')
+@click.option('--save-tfa-secret', is_flag=True,
+              help='After a successful login, store --tfa-secret in the keychain '
+                   '(see `config --set-keychain`) so later logins and unattended '
+                   'auto-login generate 2FA codes without it.')
 @click.option('--non-interactive', is_flag=True, help='Run in non-interactive mode')
 @click.option('--debug', is_flag=True, help='Enable debug output')
 def login(email: Optional[str], password: Optional[str], password_stdin: bool,
-          tfa: Optional[str], tfa_secret: Optional[str], non_interactive: bool,
-          debug: bool):
+          tfa: Optional[str], tfa_secret: Optional[str], save_tfa_secret: bool,
+          non_interactive: bool, debug: bool):
     """Login to your Internxt account.
 
     Credentials can be supplied (most to least secure): piped via
@@ -218,6 +222,14 @@ def login(email: Optional[str], password: Optional[str], password_stdin: bool,
             click.echo(f"⚠️  Could not check 2FA status: {e}")
             is_2fa_needed = False
         
+        if save_tfa_secret and not tfa_secret:
+            click.echo("❌ --save-tfa-secret needs --tfa-secret (or INTERNXT_TFA_SECRET)", err=True)
+            sys.exit(1)
+
+        # Fall back to a TOTP secret saved in the keychain
+        if is_2fa_needed and not tfa and not tfa_secret:
+            tfa_secret = config_service.get_tfa_secret(email)
+
         # Auto-derive 2FA code from TOTP secret if provided
         if is_2fa_needed and not tfa and tfa_secret:
             try:
@@ -251,6 +263,13 @@ def login(email: Optional[str], password: Optional[str], password_stdin: bool,
         root_folder_id = credentials['user'].get('rootFolderId', '')
         
         click.echo(f"✅ Successfully logged in as: {user_email}")
+        if save_tfa_secret:
+            try:
+                config_service.save_tfa_secret(user_email, tfa_secret)
+                where = config_service.get_keychain() or "the OS default keychain"
+                click.echo(f"🔑 Saved the 2FA secret in {where}")
+            except Exception as e:
+                click.echo(f"⚠️  Logged in, but could not save the 2FA secret: {e}", err=True)
         if debug:
             print(f"🔍 User UUID: {user_uuid}")
             print(f"🔍 Root Folder ID: {root_folder_id}")
@@ -868,6 +887,7 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
         skipped_count = 0
         error_count = 0
         filtered_count = 0
+        empty_count = 0
 
         processed_dirs = set()
 
@@ -925,6 +945,8 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                         success_count += 1
                     elif upload_result == "skipped":
                         skipped_count += 1
+                    elif upload_result == "empty":
+                        empty_count += 1
                     else:
                         error_count += 1
 
@@ -1032,7 +1054,7 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                                 _safe_log(f"  -> ⚠️  Could not save remote scan cache: {cache_err}")
 
                     def _bump_counter(kind: str) -> None:
-                        nonlocal success_count, skipped_count, error_count, filtered_count
+                        nonlocal success_count, skipped_count, error_count, filtered_count, empty_count
                         with counters_lock:
                             if kind == 'success':
                                 success_count += 1
@@ -1042,6 +1064,8 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                                 error_count += 1
                             elif kind == 'filtered':
                                 filtered_count += 1
+                            elif kind == 'empty':
+                                empty_count += 1
 
                     def _file_meta_from_api(api_file: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
                         plain = api_file.get('plainName', '') or api_file.get('name', '')
@@ -1089,7 +1113,16 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                             nl=False,
                         )
 
-                    def _seed_recursive(folder_uuid: str) -> None:
+                    # Relative paths of local subdirectories. The pre-scan only
+                    # descends into remote folders that mirror one of them: the
+                    # remote tree may be far larger than what is being uploaded,
+                    # and folders it skips are still listed lazily by _should_skip.
+                    local_rel_dirs = {
+                        d.relative_to(local_path).as_posix()
+                        for d in local_path.rglob('*') if d.is_dir()
+                    }
+
+                    def _seed_recursive(folder_uuid: str, rel_prefix: str = '') -> None:
                         meta = _seed_folder_cache(folder_uuid)
                         scan_progress['folders'] += 1
                         scan_progress['files'] += len(meta)
@@ -1098,8 +1131,9 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                             content = drive_service.get_folder_content(folder_uuid)
                             for sub in content.get('folders', []):
                                 sub_uuid = sub.get('uuid')
-                                if sub_uuid:
-                                    _seed_recursive(sub_uuid)
+                                sub_rel = rel_prefix + (sub.get('plainName') or sub.get('name') or '')
+                                if sub_uuid and sub_rel in local_rel_dirs:
+                                    _seed_recursive(sub_uuid, sub_rel + '/')
                         except Exception:
                             return
 
@@ -1379,6 +1413,10 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
                                         _bump_counter('skipped')
                                         with upload_progress_lock:
                                             upload_progress['done'] += 1
+                                    elif result == 'empty':
+                                        _bump_counter('empty')
+                                        with upload_progress_lock:
+                                            upload_progress['done'] += 1
                                     elif result == 'cancelled':
                                         with upload_progress_lock:
                                             upload_progress['done'] += 1
@@ -1433,6 +1471,8 @@ def upload(sources: Tuple[str, ...], target_path: str, recursive: bool, on_confl
     click.echo(f"  ⏭️  Skipped:  {skipped_count}")
     if filtered_count > 0:
         click.echo(f"  🚫 Filtered: {filtered_count}")
+    if empty_count > 0:
+        click.echo(f"  ⚪ Empty (not uploaded): {empty_count}")
     click.echo(f"  ❌ Errors:   {error_count}")
     click.echo("=" * 40)
     if aborted:
@@ -3165,8 +3205,26 @@ def test():
 
 
 @cli.command()
-def config():
+@click.option('--set-keychain', 'set_keychain', metavar='KEYCHAIN',
+              help='macOS keychain (name or .keychain-db path) to keep the '
+                   'credential key and 2FA secret in, instead of the default '
+                   'keychain. Saved for later runs; INTERNXT_KEYCHAIN overrides it.')
+@click.option('--unset-keychain', is_flag=True,
+              help='Forget the saved keychain and use the OS default again.')
+def config(set_keychain: Optional[str], unset_keychain: bool):
     """Show current configuration"""
+    if set_keychain or unset_keychain:
+        if set_keychain and sys.platform == 'darwin':
+            probe = subprocess.run(['security', 'show-keychain-info', set_keychain],
+                                   capture_output=True, text=True)
+            if probe.returncode != 0:
+                click.echo(f"❌ Keychain not found or not accessible: {set_keychain}", err=True)
+                sys.exit(1)
+        config_service.set_setting('keychain', None if unset_keychain else set_keychain)
+        click.echo(f"✅ Keychain: {config_service.get_setting('keychain') or 'OS default'}")
+        click.echo("   A session saved under another keychain can't be decrypted "
+                   "with this one — log in again.")
+        return
     try:
         click.echo("⚙️  Internxt CLI Configuration")
         click.echo("=" * 40)
@@ -3186,6 +3244,7 @@ def config():
         click.echo(f"   Config Dir: {config_service.internxt_cli_data_dir}")
         click.echo(f"   Credentials: {config_service.credentials_file}")
         click.echo(f"   Logs Dir: {config_service.internxt_cli_logs_dir}")
+        click.echo(f"   Keychain: {config_service.get_keychain() or 'OS default'}")
         
         # Login Status
         click.echo("\n🔐 Authentication:")
