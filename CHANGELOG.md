@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Fixed
+- **Search works again.** Internxt replaced `GET /fuzzy/{query}` with
+  `POST /fuzzy/{query}` and a JSON body (drive-server-wip
+  `FuzzySearchController`, `@internxt/sdk` `getGlobalSearchItems`); the old
+  call returned 404 and was silently reported as "No items found". Search
+  errors now surface (exit code 1), the 3–255 character limit is checked
+  locally, and `search` gains `--type` (repeatable; `folder` includes
+  folders), `--min-size`, `--max-size`, `--modified-after` and
+  `--modified-before`.
+- **No more disguised renames for timestamps.** The API sets folder and
+  file times only at creation/upload (`POST /folders` and file entries take
+  `creationTime`/`modificationTime`; `PUT …/meta` only renames, and a file
+  replace needs a new network file). `set_folder_timestamps` /
+  `set_file_timestamps` now raise `TimestampUpdateUnsupported` without a
+  request; WebDAV PROPPATCH of dates still answers 403.
+
 ### Added
 - **Selectable macOS keychain.** `config --set-keychain <name|path>` saves which
   keychain holds the credential-wrapping key and 2FA secret (in

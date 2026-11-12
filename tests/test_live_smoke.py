@@ -1299,3 +1299,49 @@ def test_live_upload_conflict_overwrite_replaces(authed_session, sentinel_folder
     )
     assert downloaded != payload_v1, "Overwrite didn't actually replace content"
     print("✅ LIVE: on_conflict='overwrite' produced new UUID with replaced bytes")
+
+
+# ---------- timestamps: only settable at creation (drive-server-wip) ----------
+
+def _folder_meta_eventually(drive, folder_uuid, attempts=8):
+    """GET /folders/{uuid}/meta can 404 for a moment after creation."""
+    import time
+    for attempt in range(attempts):
+        try:
+            return drive.get_folder_metadata(folder_uuid)
+        except ValueError as e:
+            if '404' not in str(e) or attempt == attempts - 1:
+                raise
+            time.sleep(1.5)
+
+def test_live_folder_created_with_timestamps_keeps_them(authed_session, sentinel_folder):
+    """POST /folders accepts creationTime/modificationTime — the supported
+    way to preserve folder times on Internxt."""
+    from datetime import datetime
+    drive = authed_session['drive']
+    created = drive.create_folder(
+        f"stamped_{uuid.uuid4().hex[:6]}", sentinel_folder['uuid'],
+        creation_time='2020-02-03T04:05:06.000Z',
+        modification_time='2021-06-01T08:15:30.000Z')
+    meta = _folder_meta_eventually(drive, created['uuid'])
+
+    def at(value):
+        return datetime.fromisoformat(value.replace('Z', '+00:00'))
+    assert at(meta['modificationTime']) == at('2021-06-01T08:15:30.000Z')
+    assert at(meta['creationTime']) == at('2020-02-03T04:05:06.000Z')
+
+
+def test_live_existing_folder_timestamps_are_unsupported(authed_session, sentinel_folder):
+    """No endpoint changes an existing folder's times; the client raises
+    instead of sending a rename (which failed with 409)."""
+    from services.drive import TimestampUpdateUnsupported
+    drive = authed_session['drive']
+    created = drive.create_folder(f"unstamped_{uuid.uuid4().hex[:6]}",
+                                  sentinel_folder['uuid'])
+    before = _folder_meta_eventually(drive, created['uuid'])
+    with pytest.raises(TimestampUpdateUnsupported):
+        drive.set_folder_timestamps(created['uuid'],
+                                    modification_time='2021-06-01T08:15:30Z')
+    after = _folder_meta_eventually(drive, created['uuid'])
+    assert after['plainName'] == before['plainName']
+    assert after.get('modificationTime') == before.get('modificationTime')

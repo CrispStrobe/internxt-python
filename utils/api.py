@@ -7,8 +7,13 @@ API client matching Internxt SDK
 import requests
 import json
 from typing import Dict, Any, Optional, List
+from urllib.parse import quote
 
 from config.config import config_service
+
+# drive-server-wip FuzzySearchParamsDto: MIN_SEARCH_LENGTH / MAX_SEARCH_LENGTH
+FUZZY_SEARCH_MIN_LENGTH = 3
+FUZZY_SEARCH_MAX_LENGTH = 255
 
 # utils/api.py
 
@@ -547,14 +552,41 @@ class ApiClient:
 
     # ========== SEARCH OPERATIONS ==========
 
-    def search_files(self, query: str, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
+    def search_files(self, query: str, offset: int = 0, limit: int = 50, *,
+                     types: Optional[List[str]] = None,
+                     min_size: Optional[int] = None,
+                     max_size: Optional[int] = None,
+                     modified_after: Optional[str] = None,
+                     modified_before: Optional[str] = None) -> Dict[str, Any]:
         """
-        Search for files and folders
-        Real SDK: GET /fuzzy/{search}?offset={offset}
+        Server-side fuzzy search over file and folder names.
+
+        Current API (drive-server-wip FuzzySearchController, @internxt/sdk
+        getGlobalSearchItems): POST /fuzzy/{search} with a JSON body
+        {offset, type?, minSize?, maxSize?, modifiedAfter?, modifiedBefore?}.
+        The former GET /fuzzy/{search}?offset= form was removed (HTTP 404).
+        The search text must be 3-255 characters. `limit` is kept for
+        compatibility; the server uses a fixed page size.
+        Response: {"data": [{"id", "itemId", "itemType", "name", "rank", "similarity"}]}
         """
-        url = f"{self.drive_api_url}/fuzzy/{query}"
-        params = {'offset': offset}
-        return self.get(url, params=params)
+        query = query.strip()
+        if not FUZZY_SEARCH_MIN_LENGTH <= len(query) <= FUZZY_SEARCH_MAX_LENGTH:
+            raise ValueError(
+                f"Search text must be {FUZZY_SEARCH_MIN_LENGTH}-"
+                f"{FUZZY_SEARCH_MAX_LENGTH} characters (Internxt API limit)")
+        body: Dict[str, Any] = {'offset': offset}
+        if types:
+            body['type'] = list(types)
+        if min_size is not None:
+            body['minSize'] = min_size
+        if max_size is not None:
+            body['maxSize'] = max_size
+        if modified_after:
+            body['modifiedAfter'] = modified_after
+        if modified_before:
+            body['modifiedBefore'] = modified_before
+        url = f"{self.drive_api_url}/fuzzy/{quote(query, safe='')}"
+        return self.post(url, data=body)
 
     # ========== UTILITY OPERATIONS ==========
     
