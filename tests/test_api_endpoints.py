@@ -174,11 +174,42 @@ def test_get_download_links_endpoint(capture):
 # ---------- search ----------
 
 def test_search_files_endpoint(capture):
+    """Current API: POST /fuzzy/{search} with a JSON body (GET was removed)."""
     api_client.search_files('report', offset=20)
     method, url, kwargs = capture[-1]
-    assert method == 'GET'
-    assert '/fuzzy/report' in url
-    assert kwargs['params']['offset'] == 20
+    assert method == 'POST'
+    assert url.endswith('/fuzzy/report')
+    assert kwargs['data'] == {'offset': 20}
+
+
+def test_search_files_encodes_the_search_text(capture):
+    api_client.search_files('my report #2/a')
+    _, url, _ = capture[-1]
+    assert url.endswith('/fuzzy/my%20report%20%232%2Fa')
+
+
+def test_search_files_sends_all_filters(capture):
+    api_client.search_files('report', types=['pdf', 'folder'], min_size=10,
+                            max_size=99, modified_after='2026-01-01T00:00:00Z',
+                            modified_before='2026-06-30T23:59:59Z')
+    _, _, kwargs = capture[-1]
+    assert kwargs['data'] == {
+        'offset': 0, 'type': ['pdf', 'folder'], 'minSize': 10, 'maxSize': 99,
+        'modifiedAfter': '2026-01-01T00:00:00Z',
+        'modifiedBefore': '2026-06-30T23:59:59Z'}
+
+
+@pytest.mark.parametrize('query', ['', 'ab', '  ab  ', 'x' * 256])
+def test_search_files_rejects_out_of_range_text_without_a_request(capture, query):
+    with pytest.raises(ValueError):
+        api_client.search_files(query)
+    assert capture == []
+
+
+def test_search_files_accepts_boundary_lengths(capture):
+    api_client.search_files('abc')
+    api_client.search_files('y' * 255)
+    assert len(capture) == 2
 
 
 # ---------- usage / user info ----------

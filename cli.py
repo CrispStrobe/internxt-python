@@ -2049,7 +2049,15 @@ def download_path(path: str, destination: Optional[str], recursive: bool, on_con
 @cli.command('search')
 @click.argument('search_term')
 @click.option('--detailed', '-d', is_flag=True, help='Show full metadata (slower)')
-def search(search_term: str, detailed: bool):
+@click.option('--type', 'types', multiple=True,
+              help='File extension to include (repeatable); "folder" includes folders')
+@click.option('--min-size', type=int, default=None, help='Minimum file size in bytes')
+@click.option('--max-size', type=int, default=None, help='Maximum file size in bytes')
+@click.option('--modified-after', default=None, help='ISO 8601 date, e.g. 2026-01-01T00:00:00Z')
+@click.option('--modified-before', default=None, help='ISO 8601 date')
+def search(search_term: str, detailed: bool, types: tuple, min_size: Optional[int],
+           max_size: Optional[int], modified_after: Optional[str],
+           modified_before: Optional[str]):
     """
     Perform a fast, server-side fuzzy search (global).
     
@@ -2058,7 +2066,10 @@ def search(search_term: str, detailed: bool):
     try:
         auth_service.get_auth_details()
         
-        results = drive_service.search_drive(search_term)
+        results = drive_service.search_drive(
+            search_term, types=list(types) or None, min_size=min_size,
+            max_size=max_size, modified_after=modified_after,
+            modified_before=modified_before)
         
         if not results:
             click.echo(f"❌ No items found matching '{search_term}'")

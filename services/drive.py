@@ -51,6 +51,17 @@ except (ImportError, ValueError):
     from services.auth import auth_service
 
 
+
+class TimestampUpdateUnsupported(NotImplementedError):
+    """Internxt's API sets timestamps only when an item is created/uploaded."""
+
+    def __init__(self, kind: str):
+        super().__init__(
+            f"Internxt cannot change timestamps of an existing {kind}; "
+            "they can only be set when it is created or uploaded")
+        self.kind = kind
+
+
 class DriveService:
     """
     Extended Drive operations with path resolution and trash operations
@@ -1740,28 +1751,21 @@ class DriveService:
             print(f"  -> ⚠️  Could not build path for {item_name}: {e}")
             return f"/?/{item_name}" # Return a 'best guess' path
         
-    def search_drive(self, search_term: str) -> List[Dict[str, Any]]:
+    def search_drive(self, search_term: str, **filters: Any) -> List[Dict[str, Any]]:
         """
         Performs a fast, server-side fuzzy search across the entire drive.
-        Note: The API only returns item names, types, and UUIDs, not full paths.
+        Returns {itemId, itemType, name, ...} entries (no paths). Filters are
+        passed to `api.search_files` (types, min_size, max_size,
+        modified_after, modified_before). API errors propagate: an outage
+        must not look like "no results".
         """
         print(f"🔍 Performing server-side fuzzy search for: '{search_term}'")
-        try:
-            # This 'search_files' function already exists in your api.py
-            results = self.api.search_files(search_term, offset=0, limit=50)
-            
-            # The API spec shows the data is in a 'data' key
-            # If not, it might be in 'results' or the root
-            items = results.get('data', results.get('results', results))
-            
-            if not isinstance(items, list):
-                print(" -> ⚠️  Search returned an unexpected format.")
-                return []
-                
-            return items
-        except Exception as e:
-            print(f" -> ❌ Search failed: {e}")
-            return []
+        results = self.api.search_files(search_term, offset=0, **filters)
+        items = results.get('data', results.get('results', results)) \
+            if isinstance(results, dict) else results
+        if not isinstance(items, list):
+            raise ValueError(f"Unexpected search response shape: {type(items).__name__}")
+        return items
 
     def create_folder(self, name: str, parent_folder_uuid: Optional[str] = None,
                       creation_time: Optional[str] = None,
@@ -2398,41 +2402,30 @@ class DriveService:
     def set_folder_timestamps(self, folder_uuid: str,
                               creation_time: Optional[str] = None,
                               modification_time: Optional[str] = None) -> Dict[str, Any]:
-        """Update creation/modification timestamps on an existing folder.
+        """Internxt cannot change timestamps of an existing folder.
 
-        Used by the WebDAV provider's PROPPATCH handler so file managers
-        (Finder, Explorer) can set folder timestamps on the remote.
+        drive-server-wip's PUT /folders/{uuid}/meta (UpdateFolderMetaDto) only
+        renames (plainName); timestamps are accepted solely when the folder is
+        created (POST /folders creationTime/modificationTime, see
+        create_folder). Raise instead of sending a request that renames or
+        fails with 409.
         """
         if not creation_time and not modification_time:
             raise ValueError("Must provide creation_time or modification_time")
-        payload: Dict[str, Any] = {}
-        if creation_time:
-            payload['creationTime'] = creation_time
-        if modification_time:
-            payload['modificationTime'] = modification_time
-        result = self.api.update_folder_metadata(folder_uuid, payload)
-        # Invalidate the parent-folder cache so subsequent listings see new times.
-        self._clear_parent_cache_for_item(folder_uuid, 'folder')
-        return result
+        raise TimestampUpdateUnsupported('folder')
 
     def set_file_timestamps(self, file_uuid: str,
                             creation_time: Optional[str] = None,
                             modification_time: Optional[str] = None) -> Dict[str, Any]:
-        """Update creation/modification timestamps on an existing file.
+        """Internxt cannot change timestamps of an existing file.
 
-        Used by the WebDAV provider's PROPPATCH handler so file managers
-        and rclone --metadata can set file timestamps on the remote.
+        PUT /files/{uuid}/meta (UpdateFileMetaDto) only takes plainName/type,
+        and PUT /files/{uuid} (replace) requires a new network fileId. Pass
+        times at upload (file entry creationTime/modificationTime) instead.
         """
         if not creation_time and not modification_time:
             raise ValueError("Must provide creation_time or modification_time")
-        payload: Dict[str, Any] = {}
-        if creation_time:
-            payload['creationTime'] = creation_time
-        if modification_time:
-            payload['modificationTime'] = modification_time
-        result = self.api.update_file_metadata(file_uuid, payload)
-        self._clear_parent_cache_for_item(file_uuid, 'file')
-        return result
+        raise TimestampUpdateUnsupported('file')
 
 
 # Global instance

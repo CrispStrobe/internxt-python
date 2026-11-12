@@ -178,18 +178,27 @@ def test_search_drive_handles_results_field_alias():
     assert len(results) == 1
 
 
-def test_search_drive_returns_empty_for_unexpected_format():
-    """If the API returns garbage, return [] rather than crash."""
+def test_search_drive_rejects_unexpected_format():
+    """Garbage from the API is an error, not an empty result."""
     with patch.object(drive_service.api, 'search_files',
                       return_value={'wrong': 'shape'}):
-        results = drive_service.search_drive('x')
-    assert results == []
+        with pytest.raises(ValueError):
+            drive_service.search_drive('xyz')
 
 
-def test_search_drive_returns_empty_on_api_error():
+def test_search_drive_propagates_api_errors():
+    """An outage or removed endpoint must not look like "no results"."""
     with patch.object(drive_service.api, 'search_files',
                       side_effect=ConnectionError("net")):
-        assert drive_service.search_drive('x') == []
+        with pytest.raises(ConnectionError):
+            drive_service.search_drive('xyz')
+
+
+def test_search_drive_passes_filters():
+    with patch.object(drive_service.api, 'search_files',
+                      return_value={'data': []}) as search:
+        drive_service.search_drive('report', types=['pdf'], min_size=5)
+    search.assert_called_once_with('report', offset=0, types=['pdf'], min_size=5)
 
 
 # ---------- get_full_path_for_item ----------

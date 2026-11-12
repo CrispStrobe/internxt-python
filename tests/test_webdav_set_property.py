@@ -112,47 +112,10 @@ def test_set_property_unknown_falls_through_to_super():
 
 # ---------- drive_service.set_folder_timestamps (the underlying call) ----------
 
-def test_drive_set_folder_timestamps_sends_update_metadata():
-    from services.drive import drive_service
-    with patch.object(drive_service.api, 'update_folder_metadata',
-                      return_value={'ok': True}) as mock_update, \
-         patch.object(drive_service, '_clear_parent_cache_for_item'):
-        result = drive_service.set_folder_timestamps(
-            'fold-uuid',
-            creation_time='2025-01-01T00:00:00Z',
-            modification_time='2025-06-01T00:00:00Z',
-        )
-    args, _ = mock_update.call_args
-    assert args[0] == 'fold-uuid'
-    assert args[1]['creationTime'] == '2025-01-01T00:00:00Z'
-    assert args[1]['modificationTime'] == '2025-06-01T00:00:00Z'
-    assert result == {'ok': True}
-
-
-def test_drive_set_folder_timestamps_only_creation():
-    from services.drive import drive_service
-    with patch.object(drive_service.api, 'update_folder_metadata',
-                      return_value={}) as mock_update, \
-         patch.object(drive_service, '_clear_parent_cache_for_item'):
-        drive_service.set_folder_timestamps(
-            'fold-uuid', creation_time='2025-01-01T00:00:00Z')
-    args, _ = mock_update.call_args
-    assert 'creationTime' in args[1]
-    assert 'modificationTime' not in args[1]
-
-
 def test_drive_set_folder_timestamps_requires_at_least_one():
     from services.drive import drive_service
     with pytest.raises(ValueError):
         drive_service.set_folder_timestamps('fold-uuid')
-
-
-def test_drive_set_folder_timestamps_clears_parent_cache():
-    from services.drive import drive_service
-    with patch.object(drive_service.api, 'update_folder_metadata', return_value={}), \
-         patch.object(drive_service, '_clear_parent_cache_for_item') as mock_clear:
-        drive_service.set_folder_timestamps('fold-uuid', creation_time='2025-01-01T00:00:00Z')
-    mock_clear.assert_called_once_with('fold-uuid', 'folder')
 
 
 # ==========================================================================
@@ -244,32 +207,44 @@ def test_file_set_property_unknown_falls_through():
 
 # ---------- drive_service.set_file_timestamps ----------
 
-def test_drive_set_file_timestamps_sends_update_metadata():
-    from services.drive import drive_service
-    with patch.object(drive_service.api, 'update_file_metadata',
-                      return_value={'ok': True}) as mock_update, \
-         patch.object(drive_service, '_clear_parent_cache_for_item'):
-        result = drive_service.set_file_timestamps(
-            'file-uuid',
-            creation_time='2025-01-01T00:00:00Z',
-            modification_time='2025-06-01T00:00:00Z',
-        )
-    args, _ = mock_update.call_args
-    assert args[0] == 'file-uuid'
-    assert args[1]['creationTime'] == '2025-01-01T00:00:00Z'
-    assert args[1]['modificationTime'] == '2025-06-01T00:00:00Z'
-    assert result == {'ok': True}
-
-
 def test_drive_set_file_timestamps_requires_at_least_one():
     from services.drive import drive_service
     with pytest.raises(ValueError):
         drive_service.set_file_timestamps('file-uuid')
 
 
-def test_drive_set_file_timestamps_clears_parent_cache():
+# ==========================================================================
+# Real drive_service: Internxt cannot change existing timestamps, so a
+# PROPPATCH fails as 403 (as before) but without sending a disguised rename.
+# ==========================================================================
+
+@pytest.mark.parametrize('prop,value', [
+    ('{DAV:}creationdate', '2025-01-01T00:00:00Z'),
+    ('{DAV:}getlastmodified', 'Wed, 21 Oct 2015 07:28:00 GMT'),
+    ('{urn:schemas-microsoft-com:}Win32LastModifiedTime', 'Wed, 21 Oct 2015 07:28:00 GMT'),
+])
+def test_file_proppatch_timestamps_are_forbidden_without_requests(prop, value):
+    from wsgidav.dav_error import DAVError
     from services.drive import drive_service
-    with patch.object(drive_service.api, 'update_file_metadata', return_value={}), \
-         patch.object(drive_service, '_clear_parent_cache_for_item') as mock_clear:
-        drive_service.set_file_timestamps('file-uuid', creation_time='2025-01-01T00:00:00Z')
-    mock_clear.assert_called_once_with('file-uuid', 'file')
+    r = _resource()
+    with patch.object(drive_service.api, '_make_request') as request:
+        with pytest.raises(DAVError) as err:
+            r.set_property(prop, value)
+    assert err.value.value == 403
+    request.assert_not_called()
+
+
+@pytest.mark.parametrize('prop,value', [
+    ('{DAV:}creationdate', '2025-01-01T00:00:00Z'),
+    ('{DAV:}getlastmodified', 'Wed, 21 Oct 2015 07:28:00 GMT'),
+])
+def test_folder_proppatch_timestamps_are_forbidden_without_requests(prop, value):
+    from wsgidav.dav_error import DAVError
+    from services.drive import drive_service
+    c = _collection()
+    with patch.object(drive_service.api, '_make_request') as request:
+        with pytest.raises(DAVError) as err:
+            c.set_property(prop, value)
+    assert err.value.value == 403
+    request.assert_not_called()
+
