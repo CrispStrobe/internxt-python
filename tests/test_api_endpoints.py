@@ -222,10 +222,36 @@ def test_get_storage_usage_endpoint(capture):
 
 
 def test_get_user_info_endpoint(capture):
+    """GET /users/me was removed (404); account data comes from /users/refresh."""
     api_client.get_user_info()
     method, url, _ = capture[-1]
     assert method == 'GET'
-    assert url.endswith('/users/me')
+    assert url.endswith('/users/refresh')
+
+
+def test_get_user_info_returns_the_user_without_secrets():
+    refreshed = {
+        'token': 't', 'newToken': 'nt',
+        'user': {
+            'email': 'u@example.com', 'uuid': 'u-1', 'rootFolderId': 'root',
+            'name': 'U', 'lastname': 'Ser',
+            'mnemonic': 'encrypted words', 'privateKey': 'priv',
+            'publicKey': 'pub', 'revocationKey': 'rev', 'revocateKey': 'rev2',
+            'keys': {'ecc': {'privateKey': 'p'}, 'kyber': {'privateKey': 'k'}},
+            'bridgeUser': 'b@example.com', 'userId': 'secret-user-id',
+            'token': 't', 'newToken': 'nt',
+        },
+    }
+    with patch.object(api_client, 'get', return_value=refreshed) as get:
+        info = api_client.get_user_info()
+    assert get.call_args[0][0].endswith('/users/refresh')
+    assert info == {'email': 'u@example.com', 'uuid': 'u-1',
+                    'rootFolderId': 'root', 'name': 'U', 'lastname': 'Ser'}
+
+
+def test_get_user_info_without_a_user_object_is_empty():
+    with patch.object(api_client, 'get', return_value={}):
+        assert api_client.get_user_info() == {}
 
 
 # ---------- security_details / refresh_token ----------

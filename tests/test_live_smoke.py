@@ -215,32 +215,17 @@ def test_live_storage_usage_endpoint(authed_session):
     assert isinstance(usage, dict)
 
 
-def test_live_user_info_endpoint_known_404():
-    """REGRESSION marker: `/drive/users/me` does not exist on the live
-    backend (returns "Cannot GET /api/users/me"). `api.get_user_info()`
-    is therefore dead code from the CLI's perspective — the same data
-    is available via the credentials returned by login.
-
-    This test pins down that current state. If the endpoint becomes
-    available later, this test will fail and tell us to wire the call
-    back into the CLI (e.g. for a richer `whoami` or `config` command).
-    """
-    project_root = Path(__file__).resolve().parent.parent
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-    from services.auth import auth_service as _auth  # already logged in by fixture
-    # Make sure we're authed
-    creds = _auth.config.read_user_credentials()
-    if not creds:
-        pytest.skip("not logged in (run other live tests first)")
-
-    with pytest.raises((ValueError, ConnectionError)) as exc_info:
-        _auth.api.get_user_info()
-    # Sanity: the failure is the expected 404, not something else
-    assert '404' in str(exc_info.value) or 'Not Found' in str(exc_info.value) \
-        or 'Cannot GET' in str(exc_info.value), (
-        f"Expected 404 from /users/me, got: {exc_info.value}"
-    )
+def test_live_user_info_endpoint(authed_session):
+    """`get_user_info()` reads the account via GET /users/refresh (GET
+    /users/me answers 404 on the live backend) and must never expose
+    secrets such as the mnemonic or key material."""
+    api = authed_session['auth'].api
+    info = api.get_user_info()
+    assert isinstance(info, dict)
+    assert info.get('email') and info.get('uuid')
+    for secret in ('mnemonic', 'keys', 'privateKey', 'publicKey',
+                   'revocationKey', 'revocateKey', 'token', 'newToken', 'userId', 'bridgeUser'):
+        assert secret not in info
 
 
 # =============================================================================

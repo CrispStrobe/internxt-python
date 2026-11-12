@@ -595,10 +595,30 @@ class ApiClient:
         url = f"{self.drive_api_url}/users/usage"
         return self.get(url)
 
+    # Fields of the /users/refresh `user` object that are secrets or
+    # storage credentials; get_user_info() never returns them.
+    USER_INFO_SECRET_FIELDS = frozenset({
+        'mnemonic', 'keys', 'privateKey', 'publicKey', 'revocationKey',
+        'revocateKey',
+        'token', 'newToken', 'bridgeUser', 'userId', 'bridgePass', 'bridgeAuth',
+    })
+
     def get_user_info(self) -> Dict[str, Any]:
-        """Get current user information"""
-        url = f"{self.drive_api_url}/users/me"
-        return self.get(url)
+        """
+        Current user's account details (email, uuid, rootFolderId, names, ...).
+
+        GET /users/me no longer exists (HTTP 404). The current account data
+        comes from GET /users/refresh, the endpoint the official clients use
+        to hydrate a session; its `user` object is returned with every secret
+        removed (mnemonic, key material, tokens and bridge credentials).
+        """
+        url = f"{self.drive_api_url}/users/refresh"
+        response = self.get(url)
+        user = response.get('user') if isinstance(response, dict) else None
+        if not isinstance(user, dict):
+            return {}
+        return {key: value for key, value in user.items()
+                if key not in self.USER_INFO_SECRET_FIELDS}
 
     def health_check(self) -> Dict[str, Any]:
         """Basic health check"""
