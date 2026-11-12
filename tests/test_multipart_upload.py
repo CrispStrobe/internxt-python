@@ -52,7 +52,8 @@ def test_start_upload_multipart_url():
 
 # ---------- shared upload harness (real crypto) ----------
 
-def _run_upload(file_size, part_size=30 * 1024 * 1024, multipart_min=100 * 1024 * 1024):
+def _run_upload(file_size, part_size=30 * 1024 * 1024, multipart_min=100 * 1024 * 1024,
+                multipart=True):
     """Drive a real upload through _perform_network_upload with a mocked API,
     returning (captured, plaintext)."""
     data = os.urandom(file_size)
@@ -95,6 +96,7 @@ def _run_upload(file_size, part_size=30 * 1024 * 1024, multipart_min=100 * 1024 
              patch.object(drive_service.config, 'internxt_cli_data_dir', Path(data_dir)), \
              patch.object(drive_service, 'UPLOAD_PART_SIZE', part_size), \
              patch.object(drive_service, 'MULTIPART_MIN_SIZE', multipart_min), \
+             patch.object(drive_service, 'multipart_uploads', multipart), \
              patch.object(drive_service.api, 'start_upload', side_effect=fake_start_upload), \
              patch.object(drive_service.api, 'upload_part', side_effect=fake_upload_part), \
              patch.object(drive_service.api, 'upload_chunk', side_effect=fake_upload_chunk), \
@@ -151,6 +153,19 @@ def test_large_file_uses_multipart():
     assert cap['expected_parts'] == 3
     assert len(cap['part_urls']) == 3
     assert cap['chunk_calls'] == 0  # multipart never uses the single-PUT path
+
+
+def test_multipart_is_the_default():
+    from services.drive import DriveService
+    assert DriveService().multipart_uploads is True
+
+
+def test_no_multipart_sends_a_large_file_as_one_put():
+    cap = _run_upload(250_000, part_size=100_000, multipart_min=50_000,
+                      multipart=False)
+    assert cap['part_urls'] == []
+    assert cap['chunk_calls'] == 1
+    assert cap['file_id'] == 'NETFILE'
 
 
 def test_local_upload_read_retries_transient_oserror():
